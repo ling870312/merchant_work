@@ -19,15 +19,15 @@
 
 > 运行打包时可在 `workflow_dispatch` 的 input 临时覆盖 `gitee_repo` / `gitee_branch`（留空则用此 Secret）。
 
-### 私有资产仓访问（SS SDK / 预集成工程所在仓，必填）
+### 私有资产仓访问（预集成工程 / SDK 所在仓，必填）
 
-> SDK、MobileVLCKit 与预集成 iOS 工程（内含渠道 appid / appkey / bundleId）均托管在**私有**资产仓（工作流 input `asset_repo`，默认值已填好），切勿上传到本公开仓。CI 用本 Secret 跨仓下载/上传资产。
+> SDK、MobileVLCKit 与预集成 iOS 工程（内含渠道 appid / appkey / bundleId）均托管在**私有**资产仓（工作流 input `asset_repo`，默认值已填好），切勿上传到本公开仓。本仓 `Build iOS IPA` 只需用本 Secret **只读**拉取预集成工程；预集成工程本身由私有资产仓的 Prepare 工作流生成并上传。
 
 | Secret 名 | 用途 | 必需 | 取值说明 |
 |---|---|---|---|
-| `ASSET_PAT` | 访问私有资产仓的 PAT（只授权该仓） | ✅ 必须 | 导出类型：Contents Read+Write（prepare 上传产出需要写；build 仅用读） |
+| `ASSET_PAT` | 访问私有资产仓的 PAT（只授权该仓） | ✅ 必须 | fine-grained PAT，Contents **Read** 即可（本仓不再运行 Prepare 上传，无需写） |
 
-> 建议用 fine-grained PAT，仅授权资产仓的 Contents 读写，过期时间设短；不要用账号级高权限 token 长期复用。
+> 建议用 fine-grained PAT，仅授权资产仓的 Contents 读取，过期时间设短；不要用账号级高权限 token 长期复用。
 
 ### iOS 签名（**按渠道**，build-ios.yml 必填）
 
