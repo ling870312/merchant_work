@@ -18,6 +18,10 @@ on:
         description: '预集成 iOS 工程的 GitHub Release tag'
         required: true
         default: 'ios-project-v1'
+      asset_repo:
+        description: '资产仓库（SDK/预集成工程所在，默认私有资产仓）'
+        required: false
+        default: 'ling870312/merchant_uniapp_v3'
       gitee_repo:
         description: 'Gitee 仓库 SSH 地址（留空则用 Secret GITEE_REPO）'
         required: false
@@ -132,14 +136,15 @@ jobs:
 
       - name: Download pre-integrated iOS project
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ASSET_PAT || secrets.GITHUB_TOKEN }}
         run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::未配置 Secret ASSET_PAT（下载私有仓资产用）"; exit 1; }
           mkdir -p ios-project
           cd ios-project
           if ! gh release download "${{ inputs.ios_project_release_tag }}" \
-              --repo "${{ github.repository }}" \
+              --repo "${{ inputs.asset_repo }}" \
               --pattern "ios-project.zip" --clobber; then
-            echo "::error::未找到预集成 iOS 工程的 Release Asset。"
+            echo "::error::未找到预集成 iOS 工程的 Release Asset（仓库 ${{ inputs.asset_repo }} / tag ${{ inputs.ios_project_release_tag }}）。"
             exit 1
           fi
           unzip -o ios-project.zip -d .

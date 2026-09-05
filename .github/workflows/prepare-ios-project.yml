@@ -25,12 +25,16 @@ on:
         description: 'OEM 渠道码（须与 Secret 命名一致），决定预集成工程的 iOS 身份'
         required: true
       output_release_tag:
-        description: '产出预集成工程的 Release tag'
+        description: '产出预集成工程的 Release tag（上传到资产仓库）'
         required: true
         default: 'ios-project-v1'
+      asset_repo:
+        description: '资产仓库（SDK/预集成工程所在，默认私有资产仓）'
+        required: false
+        default: 'ling870312/merchant_uniapp_v3'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ios-prepare
@@ -49,10 +53,11 @@ jobs:
 
       - name: Download slim SDK
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ASSET_PAT || secrets.GITHUB_TOKEN }}
         run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::未配置 Secret ASSET_PAT（下载私有仓资产用）"; exit 1; }
           gh release download "${{ inputs.sdk_release_tag }}" \
-            --repo "${{ github.repository }}" \
+            --repo "${{ inputs.asset_repo }}" \
             --pattern "ios-sdk-slim.tar.gz" --clobber --dir .
           echo "下载大小: $(wc -c < ios-sdk-slim.tar.gz) 字节"
           mkdir -p sdk-root
@@ -62,14 +67,15 @@ jobs:
 
       - name: Download MobileVLCKit (advanced monitor playback core)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ASSET_PAT || secrets.GITHUB_TOKEN }}
         run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::未配置 Secret ASSET_PAT（下载私有仓资产用）"; exit 1; }
           VLC_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello/PlugIns/MobileVLCKit"
           mkdir -p "$VLC_DIR"
           if ! gh release download "${{ inputs.mobilevlc_release_tag }}" \
-              --repo "${{ github.repository }}" \
+              --repo "${{ inputs.asset_repo }}" \
               --pattern "${{ inputs.mobilevlc_asset_name }}" --clobber --dir .; then
-            echo "::error::未找到 MobileVLCKit 资产（Release ${{ inputs.mobilevlc_release_tag }}）。"
+            echo "::error::未找到 MobileVLCKit 资产（仓库 ${{ inputs.asset_repo }} / Release ${{ inputs.mobilevlc_release_tag }}）。"
             exit 1
           fi
           tar -xzf "${{ inputs.mobilevlc_asset_name }}" -C "$VLC_DIR"
@@ -348,15 +354,16 @@ jobs:
           echo "=== zip 顶层 ==="
           unzip -l ios-project.zip | head -8
 
-      - name: Upload to Release (覆盖旧 tag)
+      - name: Upload to Release (覆盖旧 tag，上传到资产仓库)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ASSET_PAT }}
         run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::未配置 Secret ASSET_PAT（上传预集成工程到私有资产仓需写权限）"; exit 1; }
           TAG="${{ inputs.output_release_tag }}"
-          REPO="${{ github.repository }}"
+          REPO="${{ inputs.asset_repo }}"
           gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" ios-project.zip \
             --repo "$REPO" \
             --title "Pre-integrated iOS project" \
             --notes "自动生成的预集成 iOS 工程（渠道 ${{ inputs.oem_channel }}）"
-          echo "✅ ios-project.zip 已上传到 Release $TAG"
+          echo "✅ ios-project.zip 已上传到仓库 $REPO 的 Release $TAG"
