@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# 诊断：用 App Store Connect API 查询 laiyima 应用的构建与审核状态
+# 诊断：用 App Store Connect API 查询指定渠道应用的构建与审核状态
 # 环境变量：ASC_API_KEY_ID / ASC_ISSUER_ID / ASC_API_KEY_P8（.p8 文件路径）/ BUNDLE_ID
 require 'openssl'
 require 'json'

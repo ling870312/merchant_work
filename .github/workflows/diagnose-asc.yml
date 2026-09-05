@@ -19,9 +19,11 @@ jobs:
 
       - name: Write P8 key
         env:
-          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
-          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_KEY_P8: ${{ secrets[format('ASC_API_KEY_P8_{0}', inputs.oem_channel)] }}
+          ASC_API_KEY_ID: ${{ secrets[format('ASC_API_KEY_ID_{0}', inputs.oem_channel)] }}
         run: |
+          [ -n "$ASC_API_KEY_ID" ] || { echo "::error::未配置渠道 ${{ inputs.oem_channel }} 的 ASC_API_KEY_ID_${{ inputs.oem_channel }} Secret"; exit 1; }
+          [ -n "$ASC_API_KEY_P8" ] || { echo "::error::未配置渠道 ${{ inputs.oem_channel }} 的 ASC_API_KEY_P8_${{ inputs.oem_channel }} Secret"; exit 1; }
           mkdir -p "$HOME/private_keys"
           printf '%s' "$ASC_API_KEY_P8" > "$HOME/private_keys/AuthKey_${ASC_API_KEY_ID}.p8"
           chmod 600 "$HOME/private_keys/AuthKey_${ASC_API_KEY_ID}.p8"
@@ -40,9 +42,10 @@ jobs:
 
       - name: Query ASC builds
         env:
-          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_API_KEY_ID: ${{ secrets[format('ASC_API_KEY_ID_{0}', inputs.oem_channel)] }}
+          ASC_ISSUER_ID: ${{ secrets[format('ASC_ISSUER_ID_{0}', inputs.oem_channel)] }}
           BUNDLE_ID: ${{ env.BUNDLE_ID }}
         run: |
+          [ -n "$ASC_ISSUER_ID" ] || { echo "::error::未配置渠道 ${{ inputs.oem_channel }} 的 ASC_ISSUER_ID_${{ inputs.oem_channel }} Secret"; exit 1; }
           export P8_FILE="$HOME/private_keys/AuthKey_${ASC_API_KEY_ID}.p8"
           ruby scripts/ci/diagnose-asc.rb

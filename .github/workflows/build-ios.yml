@@ -292,11 +292,17 @@ jobs:
 
       - name: Install iOS signing (keychain + p12 + app-store profile)
         env:
-          IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
-          IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
-          IOS_MOBILEPROVISION_BASE64: ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
-          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          IOS_P12_BASE64: ${{ secrets[format('IOS_P12_BASE64_{0}', inputs.oem_channel)] }}
+          IOS_P12_PASSWORD: ${{ secrets[format('IOS_P12_PASSWORD_{0}', inputs.oem_channel)] }}
+          IOS_MOBILEPROVISION_BASE64: ${{ secrets[format('IOS_MOBILEPROVISION_BASE64_{0}', inputs.oem_channel)] }}
+          IOS_TEAM_ID: ${{ secrets[format('IOS_TEAM_ID_{0}', inputs.oem_channel)] }}
         run: |
+          set -eu
+          CHANNEL="${{ inputs.oem_channel }}"
+          [ -n "$IOS_P12_BASE64" ] || { echo "::error::未配置渠道 ${CHANNEL} 的签名证书 Secret (IOS_P12_BASE64_${CHANNEL})"; exit 1; }
+          [ -n "$IOS_P12_PASSWORD" ] || { echo "::error::未配置渠道 ${CHANNEL} 的证书密码 Secret (IOS_P12_PASSWORD_${CHANNEL})"; exit 1; }
+          [ -n "$IOS_MOBILEPROVISION_BASE64" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 App Store 描述文件 Secret (IOS_MOBILEPROVISION_BASE64_${CHANNEL})"; exit 1; }
+          [ -n "$IOS_TEAM_ID" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 Team ID Secret (IOS_TEAM_ID_${CHANNEL})"; exit 1; }
           export IOS_P12_BASE64=$(printf '%s' "$IOS_P12_BASE64" | tr -d '[:space:]')
           export IOS_P12_PASSWORD=$(printf '%s' "$IOS_P12_PASSWORD" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           export IOS_MOBILEPROVISION_BASE64=$(printf '%s' "$IOS_MOBILEPROVISION_BASE64" | tr -d '[:space:]')
@@ -306,10 +312,10 @@ jobs:
       - name: Install Ad Hoc provisioning profile
         if: ${{ inputs.build_adhoc == true }}
         env:
-          IOS_ADHOC_PROVISION_BASE64: ${{ secrets.IOS_ADHOC_PROVISION_BASE64 }}
+          IOS_ADHOC_PROVISION_BASE64: ${{ secrets[format('IOS_ADHOC_PROVISION_BASE64_{0}', inputs.oem_channel)] }}
         run: |
           if [ -z "$IOS_ADHOC_PROVISION_BASE64" ]; then
-            echo "::error::build_adhoc=true 但未配置 Secret IOS_ADHOC_PROVISION_BASE64"
+            echo "::error::build_adhoc=true 但未配置 Secret IOS_ADHOC_PROVISION_BASE64_${{ inputs.oem_channel }}"
             exit 1
           fi
           PROV_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
@@ -329,7 +335,7 @@ jobs:
 
       - name: Generate ExportOptions.plist
         env:
-          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          IOS_TEAM_ID: ${{ secrets[format('IOS_TEAM_ID_{0}', inputs.oem_channel)] }}
         run: |
           gen_opts() {
             local method="$1" profile="$2" outfile="$3"
@@ -404,7 +410,7 @@ jobs:
 
       - name: Build & Export IPAs
         env:
-          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          IOS_TEAM_ID: ${{ secrets[format('IOS_TEAM_ID_{0}', inputs.oem_channel)] }}
         run: |
           METHODS="app-store"
           if [ "${{ inputs.build_adhoc }}" = "true" ] && [ -n "${PROFILE_UUID_ADHOC:-}" ]; then
@@ -590,12 +596,12 @@ jobs:
       - name: Upload to App Store Connect
         if: ${{ inputs.upload_to_asc == true }}
         env:
-          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets[format('ASC_API_KEY_ID_{0}', inputs.oem_channel)] }}
+          ASC_ISSUER_ID: ${{ secrets[format('ASC_ISSUER_ID_{0}', inputs.oem_channel)] }}
+          ASC_API_KEY_P8: ${{ secrets[format('ASC_API_KEY_P8_{0}', inputs.oem_channel)] }}
         run: |
           if [ -z "$ASC_API_KEY_ID" ] || [ -z "$ASC_ISSUER_ID" ] || [ -z "$ASC_API_KEY_P8" ]; then
-            echo "::error::启用了 upload_to_asc 但未配 ASC_API_KEY_ID / ASC_ISSUER_ID / ASC_API_KEY_P8 Secret"
+            echo "::error::启用了 upload_to_asc 但未配置渠道 ${{ inputs.oem_channel }} 的 ASC_API_KEY_ID_${{ inputs.oem_channel }} / ASC_ISSUER_ID_${{ inputs.oem_channel }} / ASC_API_KEY_P8_${{ inputs.oem_channel }} Secret"
             exit 1
           fi
           mkdir -p ~/private_keys

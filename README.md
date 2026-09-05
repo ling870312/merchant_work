@@ -9,7 +9,7 @@ GitHub 对**公开仓库**的 runner（含 macOS）免费、不消耗私有仓�
 
 - 工作流文件与 CI 脚本中**不出现任何明文敏感值**（Gitee 地址、appkey、bundleId、证书等均未硬编码）；
 - 渠道身份（bundleId / appid / displayName / profileSpecifier）运行时从 Gitee 源码 `oem_config/<channel>/oem.json` 动态读取；
-- DCloud appkey 按渠道从 Secret 间接引用（`DLOUD_APPKEY_<CHANNEL>`）；
+- DCloud appkey、iOS 签名凭据、ASC API Key 均按渠道从 Secret 间接引用（`<凭据名>_<渠道大写>`），适配各渠道分属不同公司/Apple 账号；
 - 运行时日志对 Secret 值自动掩码，并对渠道身份额外 `::add-mask::`；
 - 仅 `workflow_dispatch`（手动触发，默认分支）可访问 Secret；fork 的 PR 默认无法读取 Secret。
 
@@ -21,13 +21,9 @@ GitHub 对**公开仓库**的 runner（含 macOS）免费、不消耗私有仓�
 | `prepare-ios-project.yml` | macos-14 | 一次性生成预集成 iOS 工程（瘦身 SDK + DoorMaster-Monitor-Player + MobileVLCKit），打 Release 供 build 使用 |
 | `diagnose-asc.yml` | macos-15 | 诊断 App Store Connect 构建处理状态，定位 Invalid Binary |
 
-## OEM 渠道对照
+## OEM 渠道
 
-| 渠道码 | 品牌 |
-|---|---|
-| `laiyima` | 来一码 |
-| `rongyifu` | 融易付 |
-| `xinglianyun` | 湾驱智联云 |
+渠道清单与身份配置（bundleId / appid / displayName / profileSpecifier / appkey）统一维护在 Gitee 源码仓 `oem_config/<渠道>/oem.json`，**本仓不落任何真实渠道名与品牌名**。运行时通过 `workflow_dispatch` 的 `oem_channel` 输入（小写渠道码）选择渠道。
 
 ## 目录结构
 
@@ -57,5 +53,5 @@ scripts/ci/
 ## 安全约束
 
 - 严禁在本仓提交任何明文密钥、证书、私钥、appkey、Gitee 地址等敏感值；
-- 新增渠道时，需在 GitHub Secrets 增加 `DLOUD_APPKEY_<渠道大写>` 与（诊断用）`IOS_BUNDLE_ID_<渠道大写>`；
+- 新增渠道时，需在 GitHub Secrets 增加该渠道全员配置：`DLOUD_APPKEY_<渠道大写>`、`IOS_P12_BASE64_<渠道大写>`、`IOS_P12_PASSWORD_<渠道大写>`、`IOS_MOBILEPROVISION_BASE64_<渠道大写>`、`IOS_TEAM_ID_<渠道大写>`；若该渠道需上传 ASC，再配 `ASC_API_KEY_ID_<渠道大写>` / `ASC_ISSUER_ID_<渠道大写>` / `ASC_API_KEY_P8_<渠道大写>`（诊断用另配 `IOS_BUNDLE_ID_<渠道大写>`）。各渠道可能属不同公司，签名与 ASC 凭据**按渠道独立**，不要混用；
 - 渠道身份改动走 Gitee 源码 `oem_config/<channel>/oem.json`，无需改本仓工作流。

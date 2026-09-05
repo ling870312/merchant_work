@@ -2,12 +2,12 @@
 # read-ios-channel.sh — 从 OEM 渠道配置读取 iOS 身份，输出 KEY=VALUE 到 stdout
 #
 # 背景：build-ios.yml / prepare-ios-project.yml 曾把 bundleId/appid/displayName/profileSpecifier
-# 写死为 laiyima 渠道，导致打 rongyifu / xinglianyun 渠道包时内容错乱。
+# 写死为单渠道，导致打其他渠道包时内容错乱。
 # 本脚本把 iOS 身份改为从 oem_config/<channel>/oem.json 的 ios 段读取，按渠道正确切换。
 #
 # 用法: bash read-ios-channel.sh <repo根目录> <channel>
 #   <repo根目录> 指向 clone 出来的源码根（含 oem_config/<channel>/oem.json）
-#   <channel>    laiyima / rongyifu / xinglianyun
+#   <channel>    小写渠道码（如 xxx）
 # 输出（每行 KEY=VALUE）:
 #   CHANNEL_IOS_BUNDLE_ID / CHANNEL_IOS_DISPLAY_NAME / CHANNEL_IOS_APPID / CHANNEL_IOS_PROFILE_SPECIFIER / CHANNEL_IOS_TOKEN
 # 依赖: macOS runner 自带 python3。
