@@ -1,0 +1,629 @@
+name: Build iOS IPA
+
+# 本仓库为 Public 工程仓，只放编排逻辑；项目源码主体在 Gitee 私有仓，CI 运行时用部署私钥浅克隆。
+# 所有敏感信息（Gitee 地址/分支/私钥、iOS 证书/描述文件/Team ID、ASC API Key、DCloud appkey）
+# 全部走 GitHub Secrets，工作流文件与脚本中不出现任何明文敏感值。
+# 双 Job：prepare（ubuntu 免费）做源码构建+工程注入，build（macOS 免费额度）只做 Xcode 编译签名。
+on:
+  workflow_dispatch:
+    inputs:
+      oem_channel:
+        description: 'OEM 渠道 (laiyima / rongyifu / xinglianyun)'
+        required: true
+        default: 'laiyima'
+      version_name:
+        description: '版本号 (如 1.0.0)'
+        required: true
+        default: '1.0.0'
+      version_code:
+        description: '构建号 (如 1)'
+        required: true
+        default: '1'
+      ios_project_release_tag:
+        description: '预集成 iOS 工程的 GitHub Release tag'
+        required: true
+        default: 'ios-project-v1'
+      gitee_repo:
+        description: 'Gitee 仓库 SSH 地址（留空则用 Secret GITEE_REPO）'
+        required: false
+      gitee_branch:
+        description: 'Gitee 要 clone 的分支（留空则用 Secret GITEE_BRANCH）'
+        required: false
+      upload_to_asc:
+        description: '出 IPA 后是否自动上传到 App Store Connect'
+        required: false
+        type: boolean
+        default: true
+      build_adhoc:
+        description: '是否同时出 ad-hoc 测试包（额外增加约3分钟 macOS 时间）'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build-${{ github.ref }}-${{ inputs.oem_channel }}
+  cancel-in-progress: true
+
+env:
+  IOS_SCHEME: 'HBuilder'
+  IOS_PROJECT_NAME: 'HBuilder-Hello'
+
+jobs:
+  # ============ Job 1: 源码构建 + 工程注入（ubuntu，免费不计费）============
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # 代码主体在 Gitee 私有仓。地址/分支走 Secret，input 可临时覆盖但不写明文默认值。
+      - name: Clone source from Gitee (deploy key)
+        env:
+          GITEE_SSH_KEY: ${{ secrets.GITEE_SSH_KEY }}
+          GITEE_REPO: ${{ inputs.gitee_repo || secrets.GITEE_REPO }}
+          GITEE_BRANCH: ${{ inputs.gitee_branch || secrets.GITEE_BRANCH }}
+        run: |
+          set -eu
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$GITEE_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          if [ ! -s ~/.ssh/id_ed25519 ]; then
+            echo "::error::GITEE_SSH_KEY 为空，请检查 GitHub Secret"
+            exit 1
+          fi
+          if [ -z "$GITEE_REPO" ]; then echo "::error::Gitee 仓库地址为空（未配置 GITEE_REPO Secret 且 input 留空）"; exit 1; fi
+          if [ -z "$GITEE_BRANCH" ]; then echo "::error::Gitee 分支为空（未配置 GITEE_BRANCH Secret 且 input 留空）"; exit 1; fi
+          ssh-keyscan -t ed25519 gitee.com >> ~/.ssh/known_hosts 2>/dev/null || true
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/id_ed25519"
+          ok=0
+          for i in 1 2 3; do
+            if git clone --depth 1 -b "$GITEE_BRANCH" "$GITEE_REPO" repo; then ok=1; break; fi
+            echo "第 $i 次克隆失败，10 秒后重试..."
+            rm -rf repo; sleep 10
+          done
+          [ "$ok" = "1" ] || { echo "::error::Gitee 克隆 3 次均失败"; exit 1; }
+          echo "Cloned $(find repo -maxdepth 1 -mindepth 1 -type d | wc -l) top-level dirs"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'repo/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: repo
+
+      - name: Apply OEM config (${{ inputs.oem_channel }})
+        run: pwsh -ExecutionPolicy Bypass -File scripts/apply-oem-config.ps1 -OemChannel "${{ inputs.oem_channel }}" -SkipSigning
+        shell: bash
+        working-directory: repo
+
+      - name: Sync theme assets (tabbar icons)
+        run: pwsh -ExecutionPolicy Bypass -File scripts/sync-theme-assets.ps1
+        shell: bash
+        working-directory: repo
+        continue-on-error: true
+
+      - name: Set versionChannel=release in appBuildInfo.json
+        run: |
+          python3 -c "
+          import json
+          p = 'src/config/appBuildInfo.json'
+          with open(p, 'r', encoding='utf-8') as f:
+              d = json.load(f)
+          d['versionChannel'] = 'release'
+          with open(p, 'w', encoding='utf-8') as f:
+              json.dump(d, f, indent=2)
+          print('versionChannel=release')
+          "
+        working-directory: repo
+
+      - name: Build Uni-app App resources
+        run: npx uni build -p app
+        shell: bash
+        working-directory: repo
+        env:
+          NODE_ENV: production
+
+      - name: Verify app resources
+        run: |
+          if [ ! -d "dist/build/app" ]; then
+            echo "::error::dist/build/app 不存在，Uni-app 资源构建失败"
+            exit 1
+          fi
+          echo "App resources built"
+        working-directory: repo
+
+      - name: Download pre-integrated iOS project
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p ios-project
+          cd ios-project
+          if ! gh release download "${{ inputs.ios_project_release_tag }}" \
+              --repo "${{ github.repository }}" \
+              --pattern "ios-project.zip" --clobber; then
+            echo "::error::未找到预集成 iOS 工程的 Release Asset。"
+            exit 1
+          fi
+          unzip -o ios-project.zip -d .
+          rm ios-project.zip
+          echo "iOS project layout ready"
+
+      # 渠道身份（bundleId/appid/displayName/profileSpecifier）从 Gitee 源码 oem.json 动态读取；
+      # DCloud appkey 按渠道从 Secret 间接引用（DLOUD_APPKEY_<CHANNEL 大写>），全程无明文。
+      - name: Compute iOS channel identity
+        env:
+          DLOUD_APPKEY_LAIYIMA: ${{ secrets.DLOUD_APPKEY_LAIYIMA }}
+          DLOUD_APPKEY_RONGYIFU: ${{ secrets.DLOUD_APPKEY_RONGYIFU }}
+          DLOUD_APPKEY_XINGLIANYUN: ${{ secrets.DLOUD_APPKEY_XINGLIANYUN }}
+        run: |
+          set -eu
+          CHANNEL="${{ inputs.oem_channel }}"
+          eval "$(bash repo/scripts/ci/read-ios-channel.sh "$PWD/repo" "$CHANNEL")"
+          [ -n "$CHANNEL_IOS_BUNDLE_ID" ] || { echo "::error::渠道 bundleId 为空"; exit 1; }
+          [ -n "$CHANNEL_IOS_APPID" ] || { echo "::error::渠道 appid 为空"; exit 1; }
+          CH_UP=$(printf '%s' "$CHANNEL" | tr '[:lower:]' '[:upper:]')
+          APPKEY_VAR="DLOUD_APPKEY_${CH_UP}"
+          APPKEY="${!APPKEY_VAR:-}"
+          [ -n "$APPKEY" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 DCloud appkey Secret (DLOUD_APPKEY_${CH_UP})"; exit 1; }
+          echo "DLOUD_APPID=$CHANNEL_IOS_APPID" >> "$GITHUB_ENV"
+          echo "IOS_BUNDLE_ID=$CHANNEL_IOS_BUNDLE_ID" >> "$GITHUB_ENV"
+          echo "IOS_DISPLAY_NAME=$CHANNEL_IOS_DISPLAY_NAME" >> "$GITHUB_ENV"
+          echo "IOS_PROFILE_SPECIFIER=$CHANNEL_IOS_PROFILE_SPECIFIER" >> "$GITHUB_ENV"
+          echo "IOS_DCLOUD_APPKEY=$APPKEY" >> "$GITHUB_ENV"
+          # 掩码半敏感值，防止后续步骤意外打印到公开日志
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_BUNDLE_ID"
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_APPID"
+          printf "::add-mask::%s\n" "$APPKEY"
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_DISPLAY_NAME"
+          echo "channel identity loaded: $CHANNEL"
+
+      - name: Sync Uni-app www into iOS project
+        run: |
+          WWW_DEST="ios-project/${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}/Pandora/apps/${DLOUD_APPID}/www"
+          mkdir -p "$(dirname "$WWW_DEST")"
+          rm -rf "$WWW_DEST"
+          cp -r repo/dist/build/app "$WWW_DEST"
+          APPS_DIR="ios-project/${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}/Pandora/apps"
+          for d in "$APPS_DIR"/*/; do
+            dir_name=$(basename "$d")
+            [ "$dir_name" = "$DLOUD_APPID" ] || { rm -rf "$d"; echo "已清理 SDK Demo app"; }
+          done
+          echo "Synced www into iOS project"
+
+      - name: Fix InfoPlist.strings
+        run: |
+          PROJECT_DIR="ios-project/${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}"
+          while IFS= read -r f; do
+            printf '"CFBundleDisplayName" = "%s";\n"CFBundleName" = "Merchant";\n' "${IOS_DISPLAY_NAME}" > "$f"
+            echo "已覆写 InfoPlist.strings"
+          done < <(find "$PROJECT_DIR" -name "InfoPlist.strings" -type f)
+          PANDORA_API_APPS="${PROJECT_DIR}/PandoraApi.bundle/apps"
+          if [ -d "$PANDORA_API_APPS" ]; then
+            rm -rf "$PANDORA_API_APPS"/*
+            echo "已清理 PandoraApi.bundle/apps 拋留"
+          fi
+
+      - name: Inject iOS config into Info.plist
+        run: |
+          PLIST="ios-project/${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}-Info.plist"
+          [ -f "$PLIST" ] || { echo "::error::未找到 Info.plist: $PLIST"; exit 1; }
+          python3 repo/scripts/ci/inject-ios-config.py "$PLIST" \
+            --appkey "${IOS_DCLOUD_APPKEY}" \
+            --display-name "${IOS_DISPLAY_NAME}" \
+            --bundle-id "${IOS_BUNDLE_ID}" \
+            --version-name "${{ inputs.version_name }}" \
+            --version-code "${{ inputs.version_code }}"
+
+      - name: Inject App Icon
+        run: |
+          OEM_DIR="repo/oem_config/${{ inputs.oem_channel }}"
+          ICON_REL="$(python3 -c "
+          import json, sys
+          try:
+              cfg = json.load(open(sys.argv[1] + '/oem.json', encoding='utf-8'))
+              print((cfg.get('ios') or {}).get('appIcon') or 'icons/app.png')
+          except Exception:
+              print('icons/app.png')
+          " "$OEM_DIR")"
+          ICON_SRC="$OEM_DIR/$ICON_REL"
+          [ -f "$ICON_SRC" ] || { echo "::error::未找到 App 图标"; exit 1; }
+          bash repo/scripts/ci/sync-ios-appicons.sh "$ICON_SRC" "$GITHUB_WORKSPACE/ios-project/HBuilder-Hello"
+          echo "✅ App 图标注入完成"
+
+      - name: Package prepared iOS project
+        run: |
+          cd ios-project
+          find SDK -name '.git' -type d -exec rm -rf {} + 2>/dev/null || true
+          find HBuilder-Hello -name '.git' -type d -exec rm -rf {} + 2>/dev/null || true
+          rm -rf SDK/Doc SDK/Examples SDK/Samples 2>/dev/null || true
+          tar -cf ../ios-project-prepared.tar HBuilder-Hello SDK
+          cd ..
+          echo "打包大小: $(du -sh ios-project-prepared.tar)"
+
+      - name: Upload prepared project artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-project-prepared
+          path: ios-project-prepared.tar
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+
+  # ============ Job 2: Xcode 编译签名（macOS，免费额度）============
+  build:
+    needs: prepare
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (拿 CI 脚本)
+        uses: actions/checkout@v4
+
+      - name: Download prepared project artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-project-prepared
+          path: .
+
+      - name: Unzip prepared project
+        run: |
+          tar -xf ios-project-prepared.tar -C ios-project --strip-components=0 2>/dev/null || mkdir -p ios-project && tar -xf ios-project-prepared.tar -C ios-project
+          rm ios-project-prepared.tar
+          echo "iOS project layout ready"
+
+      # 从 Gitee 源码里读取渠道身份（build 需要 IOS_PROFILE_SPECIFIER 等）
+      - name: Clone Gitee for channel identity
+        env:
+          GITEE_SSH_KEY: ${{ secrets.GITEE_SSH_KEY }}
+          GITEE_REPO: ${{ inputs.gitee_repo || secrets.GITEE_REPO }}
+          GITEE_BRANCH: ${{ inputs.gitee_branch || secrets.GITEE_BRANCH }}
+        run: |
+          set -eu
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$GITEE_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 gitee.com >> ~/.ssh/known_hosts 2>/dev/null || true
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/id_ed25519"
+          git clone --depth 1 -b "$GITEE_BRANCH" "$GITEE_REPO" repo || { echo "::error::Gitee 克隆失败"; exit 1; }
+          echo "Cloned for channel identity"
+
+      - name: Compute iOS channel identity
+        env:
+          DLOUD_APPKEY_LAIYIMA: ${{ secrets.DLOUD_APPKEY_LAIYIMA }}
+          DLOUD_APPKEY_RONGYIFU: ${{ secrets.DLOUD_APPKEY_RONGYIFU }}
+          DLOUD_APPKEY_XINGLIANYUN: ${{ secrets.DLOUD_APPKEY_XINGLIANYUN }}
+        run: |
+          set -eu
+          CHANNEL="${{ inputs.oem_channel }}"
+          eval "$(bash repo/scripts/ci/read-ios-channel.sh "$PWD/repo" "$CHANNEL")"
+          [ -n "$CHANNEL_IOS_BUNDLE_ID" ] || { echo "::error::渠道 bundleId 为空"; exit 1; }
+          [ -n "$CHANNEL_IOS_APPID" ] || { echo "::error::渠道 appid 为空"; exit 1; }
+          CH_UP=$(printf '%s' "$CHANNEL" | tr '[:lower:]' '[:upper:]')
+          APPKEY_VAR="DLOUD_APPKEY_${CH_UP}"
+          APPKEY="${!APPKEY_VAR:-}"
+          [ -n "$APPKEY" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 DCloud appkey Secret"; exit 1; }
+          echo "DLOUD_APPID=$CHANNEL_IOS_APPID" >> "$GITHUB_ENV"
+          echo "IOS_BUNDLE_ID=$CHANNEL_IOS_BUNDLE_ID" >> "$GITHUB_ENV"
+          echo "IOS_DISPLAY_NAME=$CHANNEL_IOS_DISPLAY_NAME" >> "$GITHUB_ENV"
+          echo "IOS_PROFILE_SPECIFIER=$CHANNEL_IOS_PROFILE_SPECIFIER" >> "$GITHUB_ENV"
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_BUNDLE_ID"
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_APPID"
+          echo "channel identity loaded: $CHANNEL"
+
+      - name: Install iOS signing (keychain + p12 + app-store profile)
+        env:
+          IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
+          IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
+          IOS_MOBILEPROVISION_BASE64: ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          export IOS_P12_BASE64=$(printf '%s' "$IOS_P12_BASE64" | tr -d '[:space:]')
+          export IOS_P12_PASSWORD=$(printf '%s' "$IOS_P12_PASSWORD" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          export IOS_MOBILEPROVISION_BASE64=$(printf '%s' "$IOS_MOBILEPROVISION_BASE64" | tr -d '[:space:]')
+          bash repo/scripts/ci/install-ios-signing.sh
+        shell: bash
+
+      - name: Install Ad Hoc provisioning profile
+        if: ${{ inputs.build_adhoc == true }}
+        env:
+          IOS_ADHOC_PROVISION_BASE64: ${{ secrets.IOS_ADHOC_PROVISION_BASE64 }}
+        run: |
+          if [ -z "$IOS_ADHOC_PROVISION_BASE64" ]; then
+            echo "::error::build_adhoc=true 但未配置 Secret IOS_ADHOC_PROVISION_BASE64"
+            exit 1
+          fi
+          PROV_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROV_FILE="$PROV_DIR/adhoc.mobileprovision"
+          printf '%s' "$IOS_ADHOC_PROVISION_BASE64" | tr -d '[:space:]' | base64 --decode > "$PROV_FILE"
+          PLIST="$(/usr/bin/security cms -D -i "$PROV_FILE" 2>/dev/null || true)"
+          ADHOC_UUID="$(printf '%s' "$PLIST" | /usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin 2>/dev/null || true)"
+          if [ -n "$ADHOC_UUID" ]; then
+            mv "$PROV_FILE" "$PROV_DIR/$ADHOC_UUID.mobileprovision"
+            echo "PROFILE_UUID_ADHOC=$ADHOC_UUID" >> "$GITHUB_ENV"
+            echo "Ad Hoc profile installed"
+          else
+            echo "::error::未能提取 Ad Hoc Profile UUID"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Generate ExportOptions.plist
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          gen_opts() {
+            local method="$1" profile="$2" outfile="$3"
+            cat > "$outfile" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>${method}</string>
+            <key>teamID</key><string>${IOS_TEAM_ID}</string>
+            <key>uploadSymbols</key><true/>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${IOS_BUNDLE_ID}</key>
+              <string>${profile}</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+          }
+          gen_opts "app-store" "${PROFILE_UUID}" "ExportOptions-app-store.plist"
+          if [ -n "${PROFILE_UUID_ADHOC:-}" ]; then
+            gen_opts "ad-hoc" "${PROFILE_UUID_ADHOC}" "ExportOptions-ad-hoc.plist"
+          fi
+          echo "ExportOptions.plist generated"
+
+      - name: Select Xcode
+        run: |
+          echo "=== 已安装的 Xcode ==="
+          ls -la /Applications | grep -i xcode || true
+          XCODE_APP=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$XCODE_APP" ] || { echo "::error::未找到 Xcode"; exit 1; }
+          echo "选择: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP"
+          echo "DEVELOPER_DIR=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
+          if [ -L /Applications/Xcode.app ]; then
+            sudo rm -f /Applications/Xcode.app
+          fi
+          xcodebuild -version
+
+      - name: Inject Launch Screen
+        run: |
+          OEM_DIR="repo/oem_config/${{ inputs.oem_channel }}"
+          LAUNCH_SCREEN_SRC="$OEM_DIR/launchscreen/launchscreen.png"
+          [ -f "$LAUNCH_SCREEN_SRC" ] || { 
+            echo "::warning::未找到启动页资源，使用默认启动页"
+            exit 0
+          }
+          APP_SRC="$GITHUB_WORKSPACE/ios-project/HBuilder-Hello"
+          ASSET_DIR="$APP_SRC/Assets.xcassets"
+          LAUNCH_SCREEN_SET="$ASSET_DIR/LaunchScreen.imageset"
+          mkdir -p "$LAUNCH_SCREEN_SET"
+          cp "$LAUNCH_SCREEN_SRC" "$LAUNCH_SCREEN_SET/launchscreen.png"
+          cat > "$LAUNCH_SCREEN_SET/Contents.json" <<'JSON'
+          {
+            "images" : [
+              { "filename" : "launchscreen.png", "idiom" : "universal", "scale" : "1x" }
+            ],
+            "info" : { "author" : "xcode", "version" : 1 }
+          }
+          JSON
+          if [ ! -f "$ASSET_DIR/Contents.json" ]; then
+            echo '{ "info" : { "author" : "xcode", "version" : 1 } }' > "$ASSET_DIR/Contents.json"
+          fi
+          INFO_PLIST="$APP_SRC/HBuilder-Hello-Info.plist"
+          [ -f "$INFO_PLIST" ] && {
+            /usr/libexec/PlistBuddy -c "Delete :UILaunchStoryboardName" "$INFO_PLIST" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :UILaunchStoryboardName string LaunchScreen" "$INFO_PLIST"
+            echo "✅ Launch Screen 配置已注入"
+          } || echo "::warning::Info.plist 不存在"
+          echo "✅ Launch Screen 注入完成"
+
+      - name: Build & Export IPAs
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          METHODS="app-store"
+          if [ "${{ inputs.build_adhoc }}" = "true" ] && [ -n "${PROFILE_UUID_ADHOC:-}" ]; then
+            METHODS="app-store ad-hoc"
+          fi
+          echo "=== 可用 scheme ==="
+          (cd ios-project && xcodebuild -list -project "${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}.xcodeproj" || true)
+          for METHOD in $METHODS; do
+            if [ "$METHOD" = "app-store" ]; then
+              PROFILE="${PROFILE_UUID}"
+              OPTS="ExportOptions-app-store.plist"
+              SUFFIX="appstore"
+            else
+              PROFILE="${PROFILE_UUID_ADHOC}"
+              OPTS="ExportOptions-ad-hoc.plist"
+              SUFFIX="adhoc"
+            fi
+            echo "========== Archive ($METHOD) =========="
+            (cd ios-project && xcodebuild archive \
+              -project "${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}.xcodeproj" \
+              -scheme "${IOS_SCHEME}" \
+              -configuration Release \
+              -archivePath "../${IOS_PROJECT_NAME}-${METHOD}.xcarchive" \
+              -destination "generic/platform=iOS" \
+              CODE_SIGN_STYLE="Manual" \
+              CODE_SIGN_IDENTITY="Apple Distribution" \
+              DEVELOPMENT_TEAM="${IOS_TEAM_ID}" \
+              PROVISIONING_PROFILE="${PROFILE}" \
+              PROVISIONING_PROFILE_SPECIFIER="${IOS_PROFILE_SPECIFIER}" \
+              ASSETCATALOG_COMPILER_APPICON_NAME="AppIcon")
+            echo "========== Export ($METHOD) =========="
+            mkdir -p "ipa-export-${METHOD}"
+            xcodebuild -exportArchive \
+              -archivePath "${IOS_PROJECT_NAME}-${METHOD}.xcarchive" \
+              -exportOptionsPlist "${OPTS}" \
+              -exportPath "ipa-export-${METHOD}"
+            echo "========== Rename ($METHOD) =========="
+            (cd "ipa-export-${METHOD}" && \
+              IPA="$(ls *.ipa | head -1)" && \
+              mv "$IPA" "../${{ inputs.oem_channel }}-${{ inputs.version_name }}(${{ inputs.version_code }})-${SUFFIX}.ipa")
+            echo "✅ $METHOD IPA 已产出"
+          done
+          echo "=== 所有 IPA ==="
+          ls -la ${{ inputs.oem_channel }}-*.ipa 2>/dev/null || echo "无 IPA 产出"
+
+      - name: Deep verify IPA plugin integration
+        run: |
+          IPA_FILE=$(ls ${{ inputs.oem_channel }}-*appstore.ipa 2>/dev/null | head -1)
+          if [ -z "$IPA_FILE" ]; then
+            IPA_FILE=$(ls ${{ inputs.oem_channel }}-*.ipa 2>/dev/null | head -1)
+          fi
+          if [ -z "$IPA_FILE" ]; then
+            echo "::warning::未找到 IPA 文件，跳过验证"
+            exit 0
+          fi
+          echo "=== 深度验证 IPA: $IPA_FILE ==="
+          rm -rf /tmp/ipa-verify
+          mkdir -p /tmp/ipa-verify
+          unzip -q "$IPA_FILE" -d /tmp/ipa-verify
+          APP_DIR="/tmp/ipa-verify/Payload/HBuilder.app"
+          BIN="$APP_DIR/HBuilder"
+
+          echo ""
+          echo "========== 1. ObjC 类列表 (nm) =========="
+          echo "--- DMMonitor 类 ---"
+          nm -a "$BIN" 2>/dev/null | grep -i "DMMonitor" | head -20 || echo "(nm 无输出，尝试 strings)"
+          echo ""
+          echo "--- DCUniModule 类 ---"
+          nm -a "$BIN" 2>/dev/null | grep -i "DCUniModule" | head -20 || echo "(nm 无输出)"
+
+          echo ""
+          echo "========== 2. strings 深度搜索 =========="
+          echo "--- DMMonitor 相关字符串 ---"
+          strings "$BIN" 2>/dev/null | grep -i "DMMonitor" | sort -u | head -30
+          echo ""
+          echo "--- DCUniModule 相关字符串 ---"
+          strings "$BIN" 2>/dev/null | grep -i "DCUniModule" | sort -u | head -30
+          echo ""
+          echo "--- UNI_EXPORT / uniexmodule 相关 ---"
+          strings "$BIN" 2>/dev/null | grep -iE "uniexmodule|UNI_EXPORT|UniModuleMethod|UniModuleClass" | sort -u | head -20
+          echo ""
+          echo "--- playFullscreen / playInline 等导出方法 ---"
+          strings "$BIN" 2>/dev/null | grep -iE "playFullscreen|playInline|playSplit|getCapabilities" | sort -u | head -20
+
+          echo ""
+          echo "========== 3. ObjC 方法签名 (class-list) =========="
+          echo "--- otool -ov (ObjC metadata) ---"
+          otool -ov "$BIN" 2>/dev/null | grep -A2 "DMMonitor" | head -40 || echo "(otool 无输出或 binary stripped)"
+          echo ""
+          echo "--- otool -ov DCUniModule ---"
+          otool -ov "$BIN" 2>/dev/null | grep -A2 "DCUniModule" | head -40 || echo "(otool 无输出)"
+
+          echo ""
+          echo "========== 4. SDK 内置插件注册表 =========="
+          echo "--- PandoraApi.bundle 内容 ---"
+          ls -la "$APP_DIR/PandoraApi.bundle/" 2>/dev/null || echo "无 PandoraApi.bundle"
+          echo ""
+          echo "--- Pandora/apps 目录 ---"
+          ls -la "$APP_DIR/Pandora/apps/" 2>/dev/null || echo "无 Pandora/apps"
+          echo ""
+          echo "--- manifest.json nativePlugins ---"
+          MANIFEST=$(find "$APP_DIR/Pandora/apps" -name "manifest.json" -type f | head -1)
+          if [ -n "$MANIFEST" ]; then
+            echo "manifest 路径: $MANIFEST"
+            python3 -c "
+              import json, sys
+              d = json.load(open(sys.argv[1]))
+              np = d.get('plus', {}).get('nativePlugins', {})
+              if isinstance(np, dict):
+                  for name, cfg in np.items():
+                      ios = cfg.get('ios', {})
+                      plugins = ios.get('plugins', [])
+                      print(f'插件: {name}')
+                      for p in plugins:
+                          print(f'  type={p.get(\"type\")} name={p.get(\"name\")} class={p.get(\"class\")}')
+                      print(f'  integrateType={ios.get(\"integrateType\")}')
+              elif isinstance(np, list):
+                  for item in np:
+                      print(f'插件项: {item}')
+              else:
+                  print('nativePlugins 为空或格式未知')
+            " "$MANIFEST" 2>/dev/null || echo "解析失败"
+          else
+            echo "::error::未找到 manifest.json"
+          fi
+
+          echo ""
+          echo "========== 5. MobileVLCKit framework =========="
+          if [ -d "$APP_DIR/Frameworks/MobileVLCKit.framework" ] || \
+             find "$APP_DIR/Frameworks" -name "*VLC*" -type d 2>/dev/null | grep -q .; then
+            echo "✅ MobileVLCKit.framework 已嵌入 IPA"
+          else
+            echo "::warning::MobileVLCKit.framework 未在 IPA Frameworks/ 中找到"
+          fi
+
+          echo ""
+          echo "========== 6. 最终判定 =========="
+          DMM_SYMBOLS=$(strings "$BIN" 2>/dev/null | grep -c "DMMonitor" || true)
+          if [ -z "$DMM_SYMBOLS" ]; then DMM_SYMBOLS=0; fi
+          if [ "$DMM_SYMBOLS" -eq 0 ]; then
+            echo "::error::HBuilder 二进制中未找到 DMMonitor 符号，监控插件未编译进 IPA"
+            exit 1
+          fi
+          echo "✅ DMMonitor 符号: $DMM_SYMBOLS 处"
+
+          DMM_CLASS=$(strings "$BIN" 2>/dev/null | grep -c "DMMonitorPlayerModule" || true)
+          if [ -z "$DMM_CLASS" ]; then DMM_CLASS=0; fi
+          echo "DMMonitorPlayerModule 类名: $DMM_CLASS 处"
+
+          DCU_SYMBOLS=$(strings "$BIN" 2>/dev/null | grep -c "DCUniModule" || true)
+          if [ -z "$DCU_SYMBOLS" ]; then DCU_SYMBOLS=0; fi
+          echo "DCUniModule 符号: $DCU_SYMBOLS 处"
+
+          PLAY_METHODS=$(strings "$BIN" 2>/dev/null | grep -c "playFullscreen\|playInline\|getCapabilities" || true)
+          if [ -z "$PLAY_METHODS" ]; then PLAY_METHODS=0; fi
+          echo "导出方法名: $PLAY_METHODS 处"
+
+          rm -rf /tmp/ipa-verify
+
+      - name: Upload to App Store Connect
+        if: ${{ inputs.upload_to_asc == true }}
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          if [ -z "$ASC_API_KEY_ID" ] || [ -z "$ASC_ISSUER_ID" ] || [ -z "$ASC_API_KEY_P8" ]; then
+            echo "::error::启用了 upload_to_asc 但未配 ASC_API_KEY_ID / ASC_ISSUER_ID / ASC_API_KEY_P8 Secret"
+            exit 1
+          fi
+          mkdir -p ~/private_keys
+          printf '%s' "$ASC_API_KEY_P8" > ~/private_keys/AuthKey_${ASC_API_KEY_ID}.p8
+          chmod 600 ~/private_keys/AuthKey_${ASC_API_KEY_ID}.p8
+          IPA="$(ls ${{ inputs.oem_channel }}-*appstore.ipa 2>/dev/null | head -1)"
+          if [ -z "$IPA" ]; then
+            echo "::error::未找到 app-store IPA"
+            exit 1
+          fi
+          echo "上传 IPA 到 App Store Connect"
+          xcrun altool --upload-app -f "$IPA" -t ios \
+            --apiKey "$ASC_API_KEY_ID" --apiIssuer "$ASC_ISSUER_ID" \
+            --verbose 2>&1 | tail -40
+
+      - name: Upload IPA artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipa-${{ inputs.oem_channel }}-${{ inputs.version_name }}
+          path: ${{ inputs.oem_channel }}-*.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload dSYM (symbols)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsym-${{ inputs.oem_channel }}-${{ inputs.version_name }}
+          path: "${{ env.IOS_PROJECT_NAME }}-app-store.xcarchive/dSYMs"
+          retention-days: 30
+          if-no-files-found: warn

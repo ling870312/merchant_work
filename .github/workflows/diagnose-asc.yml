@@ -1,0 +1,55 @@
+name: Diagnose ASC Build Status
+
+# 诊断用：查询 App Store Connect 上指定渠道构建的处理状态，定位 Invalid Binary 原因。
+# bundleId 按渠道从 Secret 间接引用（IOS_BUNDLE_ID_<CHANNEL>），工作流无明文。
+on:
+  workflow_dispatch:
+    inputs:
+      oem_channel:
+        description: 'OEM 渠道 (laiyima / rongyifu / xinglianyun)'
+        required: true
+        default: 'laiyima'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write P8 key
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+        run: |
+          mkdir -p "$HOME/private_keys"
+          printf '%s' "$ASC_API_KEY_P8" > "$HOME/private_keys/AuthKey_${ASC_API_KEY_ID}.p8"
+          chmod 600 "$HOME/private_keys/AuthKey_${ASC_API_KEY_ID}.p8"
+
+      - name: Resolve channel bundleId (from Secret)
+        env:
+          IOS_BUNDLE_ID_LAIYIMA: ${{ secrets.IOS_BUNDLE_ID_LAIYIMA }}
+          IOS_BUNDLE_ID_RONGYIFU: ${{ secrets.IOS_BUNDLE_ID_RONGYIFU }}
+          IOS_BUNDLE_ID_XINGLIANYUN: ${{ secrets.IOS_BUNDLE_ID_XINGLIANYUN }}
+        run: |
+          set -eu
+          CHANNEL="${{ inputs.oem_channel }}"
+          CH_UP=$(printf '%s' "$CHANNEL" | tr '[:lower:]' '[:upper:]')
+          VAR="IOS_BUNDLE_ID_${CH_UP}"
+          BID="${!VAR:-}"
+          [ -n "$BID" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 bundleId Secret (IOS_BUNDLE_ID_${CH_UP})"; exit 1; }
+          printf "::add-mask::%s\n" "$BID"
+          echo "BUNDLE_ID=$BID" >> "$GITHUB_ENV"
+          echo "bundleId resolved for channel: $CHANNEL"
+
+      - name: Query ASC builds
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          BUNDLE_ID: ${{ env.BUNDLE_ID }}
+        run: |
+          export P8_FILE="$HOME/private_keys/AuthKey_${ASC_API_KEY_ID}.p8"
+          ruby scripts/ci/diagnose-asc.rb

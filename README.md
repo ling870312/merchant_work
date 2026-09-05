@@ -1,0 +1,61 @@
+# merchant_work — 商家 APP iOS 打包工程仓（公开 / CI-only）
+
+本仓库为 **公开 CI 工程仓**，只存放 GitHub Actions 工作流编排与 CI 脚本，**不含任何项目源码与明文敏感信息**。
+APP 源码主体托管在 Gitee 私有仓，CI 运行时用部署私钥浅克隆；所有敏感信息（Gitee 地址/分支/私钥、iOS 签名证书/描述文件/Team ID、DCloud appkey、App Store Connect API Key）全部通过 GitHub Secrets 注入。
+
+## 为什么是公开仓
+
+GitHub 对**公开仓库**的 runner（含 macOS）免费、不消耗私有仓库的付费配额。本仓设为 Public 以使用免费 macOS 额度，同时通过以下机制保证敏感信息不泄露：
+
+- 工作流文件与 CI 脚本中**不出现任何明文敏感值**（Gitee 地址、appkey、bundleId、证书等均未硬编码）；
+- 渠道身份（bundleId / appid / displayName / profileSpecifier）运行时从 Gitee 源码 `oem_config/<channel>/oem.json` 动态读取；
+- DCloud appkey 按渠道从 Secret 间接引用（`DLOUD_APPKEY_<CHANNEL>`）；
+- 运行时日志对 Secret 值自动掩码，并对渠道身份额外 `::add-mask::`；
+- 仅 `workflow_dispatch`（手动触发，默认分支）可访问 Secret；fork 的 PR 默认无法读取 Secret。
+
+## 工作流
+
+| 工作流 | Runner | 用途 |
+|---|---|---|
+| `build-ios.yml` | ubuntu-latest + macos-15 | 双 Job 打包 IPA：ubuntu 构建源码/注入工程，macOS 做 Xcode 编译签名 + 上传 ASC |
+| `prepare-ios-project.yml` | macos-14 | 一次性生成预集成 iOS 工程（瘦身 SDK + DoorMaster-Monitor-Player + MobileVLCKit），打 Release 供 build 使用 |
+| `diagnose-asc.yml` | macos-15 | 诊断 App Store Connect 构建处理状态，定位 Invalid Binary |
+
+## OEM 渠道对照
+
+| 渠道码 | 品牌 |
+|---|---|
+| `laiyima` | 来一码 |
+| `rongyifu` | 融易付 |
+| `xinglianyun` | 湾驱智联云 |
+
+## 目录结构
+
+```
+.github/workflows/
+  build-ios.yml              # 双 Job 打包 IPA
+  prepare-ios-project.yml    # 一次性预集成工程
+  diagnose-asc.yml           # ASC 诊断
+scripts/ci/
+  read-ios-channel.sh        # 从 oem.json 读渠道 iOS 身份
+  inject-ios-config.py       # 注入 Info.plist（appkey/名称/包名/版本）
+  integrate-plugins.rb       # 集成原生插件进 xcodeproj
+  sync-ios-appicons.sh        # 注入 App 图标
+  clean-privacy-strings.py    # 清理 Info.plist 隐私键
+  diagnose-asc.rb            # 查询 ASC 构建状态
+```
+
+> 其余脚本（`apply-oem-config.ps1` / `sync-theme-assets.ps1` / `install-ios-signing.sh` 等）位于 **Gitee 源码仓**的 `scripts/` 下，CI 运行时从 clone 的 `repo/` 中调用，不在本工程仓。
+
+## 快速开始
+
+1. **配置 Secrets**：见 [SECRETS.md](./SECRETS.md)，按清单逐个配置。
+2. **（首次）生成预集成工程**：手动触发 `Prepare iOS Pre-integrated Project`，产出 `ios-project-v1` Release。
+3. **打包 IPA**：手动触发 `Build iOS IPA`，选择渠道/版本/Gitee 分支（留空则用默认 Secret）。
+4. **（可选）诊断**：触发 `Diagnose ASC Build Status` 查看 ASC 处理状态。
+
+## 安全约束
+
+- 严禁在本仓提交任何明文密钥、证书、私钥、appkey、Gitee 地址等敏感值；
+- 新增渠道时，需在 GitHub Secrets 增加 `DLOUD_APPKEY_<渠道大写>` 与（诊断用）`IOS_BUNDLE_ID_<渠道大写>`；
+- 渠道身份改动走 Gitee 源码 `oem_config/<channel>/oem.json`，无需改本仓工作流。
