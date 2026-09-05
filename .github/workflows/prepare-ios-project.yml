@@ -360,7 +360,9 @@ jobs:
       - name: Package ios-project.zip
         run: |
           cd sdk-root
-          zip -qr ../ios-project.zip HBuilder-Hello SDK
+          # -0 = store（不压缩）：SDK 多为框架二进制压不动，deflate 纯耗 CPU。
+          # 打包与后续 unzip 均近秒级；体积与压缩版几乎一致，build 侧无需改动。
+          zip -0 -r ../ios-project.zip HBuilder-Hello SDK
           cd ..
           ls -la ios-project.zip
           echo "=== zip 顶层 ==="
