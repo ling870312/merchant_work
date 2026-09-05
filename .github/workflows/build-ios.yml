@@ -38,6 +38,16 @@ on:
         required: false
         type: boolean
         default: false
+      upload_ipa_artifact:
+        description: '是否同时上传 IPA 到 Actions Artifacts（默认关；上传 ASC 失败、ad-hoc 包或需要直接下载 IPA 时开启）'
+        required: false
+        type: boolean
+        default: false
+      upload_dsym_artifact:
+        description: '是否同时上传 dSYM 到 Actions Artifacts（默认关；dSYM 已随 uploadSymbols=true 提交 ASC）'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -389,7 +399,8 @@ jobs:
             echo "::warning::未找到启动页资源，使用默认启动页"
             exit 0
           }
-          APP_SRC="$GITHUB_WORKSPACE/ios-project/HBuilder-Hello"
+          # 工程实际目录是 ios-project/HBuilder-Hello/HBuilder-Hello（xcodeproj 同级）
+          APP_SRC="$GITHUB_WORKSPACE/ios-project/HBuilder-Hello/HBuilder-Hello"
           ASSET_DIR="$APP_SRC/Assets.xcassets"
           LAUNCH_SCREEN_SET="$ASSET_DIR/LaunchScreen.imageset"
           mkdir -p "$LAUNCH_SCREEN_SET"
@@ -623,6 +634,7 @@ jobs:
             --verbose 2>&1 | tail -40
 
       - name: Upload IPA artifacts
+        if: ${{ inputs.upload_ipa_artifact == true }}
         uses: actions/upload-artifact@v4
         with:
           name: ipa-${{ inputs.oem_channel }}-${{ inputs.version_name }}
@@ -631,6 +643,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload dSYM (symbols)
+        if: ${{ inputs.upload_dsym_artifact == true }}
         uses: actions/upload-artifact@v4
         with:
           name: dsym-${{ inputs.oem_channel }}-${{ inputs.version_name }}
