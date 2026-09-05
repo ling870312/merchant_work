@@ -21,13 +21,13 @@
 
 ### 私有资产仓访问（预集成工程 / SDK 所在仓，必填）
 
-> SDK、MobileVLCKit 与预集成 iOS 工程（内含渠道 appid / appkey / bundleId）均托管在**私有**资产仓（工作流 input `asset_repo`，默认值已填好），切勿上传到本公开仓。本仓 `Build iOS IPA` 只需用本 Secret **只读**拉取预集成工程；预集成工程本身由私有资产仓的 Prepare 工作流生成并上传。
+> SDK、MobileVLCKit 与预集成 iOS 工程（内含渠道 appid / appkey / bundleId）均托管在**私有**资产仓（工作流 input `asset_repo`，默认值已填好），切勿上传到本公开仓。本仓 `prepare-ios-project` 从私有仓取 SDK/插件后**把产物回传私有仓**，`build-ios` 再从私有仓**只读**拉取预集成工程。
 
 | Secret 名 | 用途 | 必需 | 取值说明 |
 |---|---|---|---|
-| `ASSET_PAT` | 访问私有资产仓的 PAT（只授权该仓） | ✅ 必须 | fine-grained PAT，Contents **Read** 即可（本仓不再运行 Prepare 上传，无需写） |
+| `ASSET_PAT` | 访问私有资产仓的 PAT（只授权该仓） | ✅ 必须 | fine-grained PAT，Contents **Read+Write**（prepare 需上传预集成工程回私有仓，build 仅用 Read） |
 
-> 建议用 fine-grained PAT，仅授权资产仓的 Contents 读取，过期时间设短；不要用账号级高权限 token 长期复用。
+> 建议用 fine-grained PAT，仅授权资产仓的 Contents 读写，过期时间设短；不要用账号级高权限 token 长期复用。
 
 ### iOS 签名（**按渠道**，build-ios.yml 必填）
 

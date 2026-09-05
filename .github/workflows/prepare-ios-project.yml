@@ -1,0 +1,381 @@
+name: Prepare iOS Pre-integrated Project
+
+on:
+  workflow_dispatch:
+    inputs:
+      gitee_repo:
+        description: 'Gitee 仓库 SSH 地址（留空则用 Secret GITEE_REPO）'
+        required: false
+      gitee_branch:
+        description: 'Gitee 分支，拿 nativeplugins 插件（留空则用 Secret GITEE_BRANCH）'
+        required: false
+      sdk_release_tag:
+        description: '瘦身 SDK 的 Release tag'
+        required: true
+        default: 'ios-sdk-slim'
+      mobilevlc_release_tag:
+        description: 'MobileVLCKit 二进制的 Release tag（H265/RTMP 高级流播放内核）'
+        required: true
+        default: 'ios-mobilevlc-v1'
+      mobilevlc_asset_name:
+        description: 'MobileVLCKit 资产文件名（解压后是 .xcframework）'
+        required: true
+        default: 'MobileVLCKit.xcframework.tar.gz'
+      oem_channel:
+        description: 'OEM 渠道码（须与 Secret 命名一致），决定预集成工程的 iOS 身份'
+        required: true
+      output_release_tag:
+        description: '产出预集成工程的 Release tag（上传到资产仓库）'
+        required: true
+        default: 'ios-project-v1'
+      asset_repo:
+        description: '资产仓库（SDK/预集成工程所在，默认私有资产仓）'
+        required: false
+        default: 'ling870312/merchant_uniapp_v3'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-prepare
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - name: Checkout (拿本仓库的 Ruby 脚本)
+        uses: actions/checkout@v4
+
+      - name: Install xcodeproj gem
+        run: gem install xcodeproj --no-document
+
+      - name: Download slim SDK
+        env:
+          GH_TOKEN: ${{ secrets.ASSET_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::未配置 Secret ASSET_PAT（下载私有仓资产用）"; exit 1; }
+          gh release download "${{ inputs.sdk_release_tag }}" \
+            --repo "${{ inputs.asset_repo }}" \
+            --pattern "ios-sdk-slim.tar.gz" --clobber --dir .
+          echo "下载大小: $(wc -c < ios-sdk-slim.tar.gz) 字节"
+          mkdir -p sdk-root
+          tar -xzf ios-sdk-slim.tar.gz -C sdk-root
+          echo "SDK 解压完成"
+          ls sdk-root/SDK/Bundles/weex-polyfill.js sdk-root/SDK/Bundles/PandoraApi.bundle
+
+      - name: Download MobileVLCKit (advanced monitor playback core)
+        env:
+          GH_TOKEN: ${{ secrets.ASSET_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::未配置 Secret ASSET_PAT（下载私有仓资产用）"; exit 1; }
+          VLC_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello/PlugIns/MobileVLCKit"
+          mkdir -p "$VLC_DIR"
+          if ! gh release download "${{ inputs.mobilevlc_release_tag }}" \
+              --repo "${{ inputs.asset_repo }}" \
+              --pattern "${{ inputs.mobilevlc_asset_name }}" --clobber --dir .; then
+            echo "::error::未找到 MobileVLCKit 资产（仓库 ${{ inputs.asset_repo }} / Release ${{ inputs.mobilevlc_release_tag }}）。"
+            exit 1
+          fi
+          tar -xzf "${{ inputs.mobilevlc_asset_name }}" -C "$VLC_DIR"
+          rm -f "${{ inputs.mobilevlc_asset_name }}"
+          echo "MobileVLCKit 就位"
+
+      - name: Clone Gitee (nativeplugins)
+        env:
+          GITEE_SSH_KEY: ${{ secrets.GITEE_SSH_KEY }}
+          GITEE_REPO: ${{ inputs.gitee_repo || secrets.GITEE_REPO }}
+          GITEE_BRANCH: ${{ inputs.gitee_branch || secrets.GITEE_BRANCH }}
+        run: |
+          set -eu
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$GITEE_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          [ -s ~/.ssh/id_ed25519 ] || { echo "::error::GITEE_SSH_KEY 为空"; exit 1; }
+          [ -n "$GITEE_REPO" ] || { echo "::error::Gitee 仓库地址为空"; exit 1; }
+          [ -n "$GITEE_BRANCH" ] || { echo "::error::Gitee 分支为空"; exit 1; }
+          ssh-keyscan -t ed25519 gitee.com >> ~/.ssh/known_hosts 2>/dev/null || true
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/id_ed25519"
+          ok=0
+          for i in 1 2 3; do
+            if git clone --depth 1 -b "$GITEE_BRANCH" "$GITEE_REPO" repo; then ok=1; break; fi
+            echo "第 $i 次克隆失败，10 秒后重试..."
+            rm -rf repo; sleep 10
+          done
+          [ "$ok" = "1" ] || { echo "::error::Gitee 克隆 3 次均失败"; exit 1; }
+          echo "Cloned nativeplugins"
+
+      - name: Compute iOS channel identity
+        env:
+          CHANNEL_APPKEY: ${{ secrets[format('DLOUD_APPKEY_{0}', inputs.oem_channel)] }}
+        run: |
+          set -eu
+          CHANNEL="${{ inputs.oem_channel }}"
+          eval "$(bash repo/scripts/ci/read-ios-channel.sh "$PWD/repo" "$CHANNEL")"
+          [ -n "$CHANNEL_IOS_BUNDLE_ID" ] || { echo "::error::渠道 bundleId 为空"; exit 1; }
+          [ -n "$CHANNEL_IOS_APPID" ] || { echo "::error::渠道 appid 为空"; exit 1; }
+          APPKEY="${CHANNEL_APPKEY:-}"
+          [ -n "$APPKEY" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 DCloud appkey Secret (DLOUD_APPKEY_${CHANNEL})"; exit 1; }
+          echo "IOS_BUNDLE_ID=$CHANNEL_IOS_BUNDLE_ID" >> "$GITHUB_ENV"
+          echo "IOS_DISPLAY_NAME=$CHANNEL_IOS_DISPLAY_NAME" >> "$GITHUB_ENV"
+          echo "DLOUD_APPID=$CHANNEL_IOS_APPID" >> "$GITHUB_ENV"
+          echo "IOS_PROFILE_SPECIFIER=$CHANNEL_IOS_PROFILE_SPECIFIER" >> "$GITHUB_ENV"
+          echo "IOS_DCLOUD_APPKEY=$APPKEY" >> "$GITHUB_ENV"
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_BUNDLE_ID"
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_APPID"
+          printf "::add-mask::%s\n" "$APPKEY"
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_DISPLAY_NAME"
+          echo "channel identity loaded: $CHANNEL"
+
+      - name: Copy plugins into project
+        run: |
+          T=sdk-root/HBuilder-Hello/HBuilder-Hello
+          mkdir -p "$T/PlugIns/DoorMasterMonitorPlayer"
+          cp repo/nativeplugins/DoorMaster-Monitor-Player/ios/*.h "$T/PlugIns/DoorMasterMonitorPlayer/" 2>/dev/null || true
+          cp repo/nativeplugins/DoorMaster-Monitor-Player/ios/*.m "$T/PlugIns/DoorMasterMonitorPlayer/"
+          echo "插件文件已就位"
+          ls "$T/PlugIns/DoorMasterMonitorPlayer" | head
+
+      - name: Write PrivacyInfo.xcprivacy
+        run: |
+          cat > sdk-root/SDK/PrivacyInfo.xcprivacy <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>NSPrivacyTracking</key><false/>
+            <key>NSPrivacyTrackingDomains</key><array/>
+            <key>NSPrivacyCollectedDataTypes</key><array/>
+            <key>NSPrivacyAccessedAPITypes</key>
+            <array>
+              <dict>
+                <key>NSPrivacyAccessedAPIType</key><string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+                <key>NSPrivacyAccessedAPITypeReasons</key><array><string>C617.1</string></array>
+              </dict>
+              <dict>
+                <key>NSPrivacyAccessedAPIType</key><string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+                <key>NSPrivacyAccessedAPITypeReasons</key><array><string>CA92.1</string></array>
+              </dict>
+              <dict>
+                <key>NSPrivacyAccessedAPIType</key><string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+                <key>NSPrivacyAccessedAPITypeReasons</key><array><string>E174.1</string></array>
+              </dict>
+            </array>
+          </dict>
+          </plist>
+          EOF
+          echo "PrivacyInfo.xcprivacy 已写入"
+          rm -f sdk-root/HBuilder-Hello/HBuilder-Hello/PrivacyInfo.xcprivacy 2>/dev/null || true
+
+      - name: Locate DCUniModule.h (diagnostics)
+        run: |
+          echo "=== 搜索 DCUniModule.h ==="
+          cd sdk-root
+          echo "--- HBuilder-Hello 子目录 ---"
+          find HBuilder-Hello -name "DCUniModule.h" -type f 2>/dev/null || true
+          echo "--- SDK 子目录 ---"
+          find SDK -name "DCUniModule.h" -type f 2>/dev/null || true
+          echo "--- 全局搜索（排除 .git）---"
+          find . -name "DCUniModule.h" -type f -not -path '*/.git/*' 2>/dev/null || true
+          echo ""
+          echo "=== 搜索 DCUniDefine.h（UNI_EXPORT_METHOD 宏定义所在）==="
+          echo "DMMonitorPluginCompat.h 同时 import DCUniDefine.h 与 DCUniModule.h；"
+          echo "DCUniDefine.h 未命中 → UNI_EXPORT_METHOD 退化为空宏 → 方法不注册。"
+          echo "--- HBuilder-Hello 子目录 ---"
+          find HBuilder-Hello -name "DCUniDefine.h" -type f 2>/dev/null || true
+          echo "--- SDK 子目录 ---"
+          find SDK -name "DCUniDefine.h" -type f 2>/dev/null || true
+          echo "--- 全局搜索（排除 .git）---"
+          find . -name "DCUniDefine.h" -type f -not -path '*/.git/*' 2>/dev/null || true
+          echo ""
+          echo "--- 检查 DCUniDefine.h 是否定义 UNI_EXPORT_METHOD（权威判定）---"
+          DEF_FILE=$(find . -name "DCUniDefine.h" -type f -not -path '*/.git/*' 2>/dev/null | head -1)
+          if [ -n "$DEF_FILE" ]; then
+            echo "文件: $DEF_FILE"
+            if grep -q "UNI_EXPORT_METHOD" "$DEF_FILE" 2>/dev/null; then
+              echo "✅ DCUniDefine.h 已定义 UNI_EXPORT_METHOD / UNI_EXPORT_METHOD_SYNC，插件方法可正常注册"
+              grep -n "UNI_EXPORT_METHOD\|UNI_EXPORT_METHOD_SYNC" "$DEF_FILE" 2>/dev/null | head -8
+            else
+              echo "::error::DCUniDefine.h 存在但未定义 UNI_EXPORT_METHOD，宏将退化为空，方法不注册"
+            fi
+          else
+            echo "::error::未找到 DCUniDefine.h，UNI_EXPORT_METHOD 宏可能失效"
+          fi
+          DCU_FILE=$(find . -name "DCUniModule.h" -type f -not -path '*/.git/*' 2>/dev/null | head -1)
+          if [ -n "$DCU_FILE" ]; then
+            echo "文件: $DCU_FILE"
+            if grep -q "UNI_EXPORT_METHOD" "$DCU_FILE" 2>/dev/null; then
+              echo "✅ DCUniModule.h 中直接定义了 UNI_EXPORT_METHOD"
+            else
+              echo "ℹ️ DCUniModule.h 未直接定义 UNI_EXPORT_METHOD（正常，宏在 DCUniDefine.h；权威判定见上方）"
+            fi
+          else
+            echo "::error::未找到 DCUniModule.h"
+          fi
+          echo "sdk-root 顶层:"
+          ls -la
+          echo "SDK/inc/DCUni 内容:"
+          ls -la SDK/inc/DCUni/ 2>/dev/null || echo "无 DCUni 目录"
+          echo "SDK/inc 内容:"
+          ls -la SDK/inc/ 2>/dev/null || echo "无 SDK/inc 目录"
+
+      - name: Integrate plugins (Ruby xcodeproj)
+        env:
+          IOS_BUNDLE_ID: ${{ env.IOS_BUNDLE_ID }}
+        run: |
+          cd sdk-root
+          ruby "$GITHUB_WORKSPACE/scripts/ci/integrate-plugins.rb"
+          echo "=== 验证 HEADER_SEARCH_PATHS ==="
+          PROJ="HBuilder-Hello/HBuilder-Hello.xcodeproj/project.pbxproj"
+          if [ -f "$PROJ" ]; then
+            grep -c "DCUniModule" "$PROJ" || echo "(未找到 DCUniModule 引用)"
+          else
+            echo "::error::project.pbxproj 不存在: $PROJ"
+            exit 1
+          fi
+
+      - name: Inject feature.plist (native plugin registration)
+        run: |
+          cd sdk-root
+          python3 "$GITHUB_WORKSPACE/scripts/ci/inject-ios-feature-plist.py" .
+          echo "=== feature.plist 注册条目验证 ==="
+          PLIST=$(find . -name "feature.plist" -path "*PandoraApi*" -not -path "*/Examples/*" -not -path "*/Samples/*" 2>/dev/null | head -1)
+          if [ -z "$PLIST" ]; then
+            echo "::error::inject 后仍未找到 PandoraApi.bundle/feature.plist"
+            exit 1
+          fi
+          echo "feature.plist: $PLIST"
+          python3 -c "
+          import plistlib, sys
+          pl = plistlib.load(open(sys.argv[1],'rb'))
+          for name in ['DoorMaster-Monitor-Player','doorMasterMonitorPlayerView']:
+              print(f'  {name} -> {pl.get(name)}')
+          " "$PLIST" 2>/dev/null || echo "(解析失败，但文件存在)"
+
+      - name: Configure Info.plist and control.xml
+        run: |
+          PLIST="sdk-root/HBuilder-Hello/HBuilder-Hello/HBuilder-Hello-Info.plist"
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleIdentifier" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string ${IOS_BUNDLE_ID}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleDisplayName" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ${IOS_DISPLAY_NAME}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Delete :dcloud_appkey" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :dcloud_appkey string ${IOS_DCLOUD_APPKEY}" "$PLIST"
+          python3 "$GITHUB_WORKSPACE/scripts/ci/clean-privacy-strings.py" "$PLIST"
+          echo "=== Info.plist 配置完成 ==="
+
+          PROJECT_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello"
+          while IFS= read -r f; do
+            printf '"CFBundleDisplayName" = "%s";\n"CFBundleName" = "Merchant";\n' "${IOS_DISPLAY_NAME}" > "$f"
+            echo "已覆写: InfoPlist.strings"
+          done < <(find "$PROJECT_DIR" -name "InfoPlist.strings" -type f)
+
+          CTRL="sdk-root/HBuilder-Hello/HBuilder-Hello/control.xml"
+          sed -i '' "s/__UNI__33C5XXX/$DLOUD_APPID/g" "$CTRL"
+          sed -i '' 's/debug="true"/debug="false"/g' "$CTRL"
+          echo "control.xml 已配置"
+
+          APPS="sdk-root/HBuilder-Hello/HBuilder-Hello/Pandora/apps"
+          rm -rf "$APPS"/*
+          mkdir -p "$APPS/${DLOUD_APPID}"
+          echo "=== Pandora/apps 已重置 ==="
+          PANDORA_API_APPS="sdk-root/HBuilder-Hello/HBuilder-Hello/PandoraApi.bundle/apps"
+          if [ -d "$PANDORA_API_APPS" ]; then
+            rm -rf "$PANDORA_API_APPS"/*
+            echo "=== PandoraApi.bundle/apps 已清理 ==="
+          fi
+
+      - name: Sanity check (scheme 与工程可解析)
+        run: |
+          cd sdk-root/HBuilder-Hello
+          echo "=== xcodebuild -list（确认 scheme 名）==="
+          xcodebuild -list -project HBuilder-Hello.xcodeproj
+
+      - name: Verify plugin integration
+        run: |
+          echo "=== 验证原生插件集成 ==="
+          PROJ="sdk-root/HBuilder-Hello/HBuilder-Hello.xcodeproj/project.pbxproj"
+          DMM_COUNT=$(grep -c "DMMonitor.*\.m" "$PROJ" 2>/dev/null || echo "0")
+          if [ "$DMM_COUNT" -eq 0 ]; then
+            echo "::error::DMMonitor 源文件未加入 Xcode 编译源"
+            exit 1
+          fi
+          echo "✅ DMMonitor 源文件 ($DMM_COUNT 处引用) 已加入编译"
+          if ! grep -q "HEADER_SEARCH_PATHS" "$PROJ" 2>/dev/null; then
+            echo "::error::project.pbxproj 中未找到 HEADER_SEARCH_PATHS 配置"
+            exit 1
+          fi
+          echo "--- HEADER_SEARCH_PATHS ---"
+          grep "HEADER_SEARCH_PATHS" "$PROJ" | head -5
+          echo "--- 校验 HEADER_SEARCH_PATHS 是否命中 DCUniDefine.h/DCUniModule.h 所在目录 ---"
+          if grep -q "SDK/inc/DCUni" "$PROJ" 2>/dev/null; then
+            echo "✅ HEADER_SEARCH_PATHS 命中 SDK/inc/DCUni（DCUniDefine.h 与 DCUniModule.h 均可解析，UNI_EXPORT_METHOD 生效）"
+          else
+            echo "::error::HEADER_SEARCH_PATHS 未命中 SDK/inc/DCUni，<DCUni/DCUniDefine.h> 无法解析"
+            echo "::error::UNI_EXPORT_METHOD 将回退为 DMMonitorPluginCompat.h 的空宏桩，方法不会注册"
+            exit 1
+          fi
+          DCU_COUNT=$(find sdk-root -name "DCUniModule.h" -type f 2>/dev/null | wc -l || echo "0")
+          if [ "$DCU_COUNT" -eq 0 ]; then
+            echo "::error::SDK 中未找到 DCUniModule.h"
+            exit 1
+          fi
+          echo "✅ 找到 $DCU_COUNT 个 DCUniModule.h"
+          if grep -q "MobileVLCKit" "$PROJ" 2>/dev/null; then
+            echo "✅ MobileVLCKit 已 Link + Embed"
+          else
+            echo "::warning::MobileVLCKit 未在工程中找到"
+          fi
+          PLUGIN_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello/PlugIns/DoorMasterMonitorPlayer"
+          PLUGIN_FILES=$(ls "$PLUGIN_DIR"/*.m 2>/dev/null | wc -l || echo "0")
+          if [ "$PLUGIN_FILES" -eq 0 ]; then
+            echo "::error::PlugIns/DoorMasterMonitorPlayer 目录下无 .m 源文件"
+            exit 1
+          fi
+          echo "✅ 插件目录有 $PLUGIN_FILES 个 .m 源文件"
+
+          echo "--- 验证 feature.plist 插件注册 ---"
+          FEATURE_PLIST=$(find sdk-root -name "feature.plist" -path "*PandoraApi*" -not -path "*/Examples/*" -not -path "*/Samples/*" 2>/dev/null | head -1)
+          if [ -z "$FEATURE_PLIST" ]; then
+            echo "::error::未找到 PandoraApi.bundle/feature.plist，原生插件无法注册到 uni 运行时"
+            echo "::error::requireNativePlugin 将返回 null (plugin object: unresolved; methods: none)"
+            exit 1
+          fi
+          echo "feature.plist: $FEATURE_PLIST"
+          python3 -c "
+          import plistlib, sys
+          pl = plistlib.load(open(sys.argv[1],'rb'))
+          ok = True
+          for name in ['DoorMaster-Monitor-Player','doorMasterMonitorPlayerView']:
+              entry = pl.get(name)
+              if not entry:
+                  print(f'::error::feature.plist 缺少 {name} 注册条目')
+                  ok = False
+              else:
+                  print(f'  ✅ {name} -> {entry}')
+          sys.exit(0 if ok else 1)
+          " "$FEATURE_PLIST"
+
+      - name: Package ios-project.zip
+        run: |
+          cd sdk-root
+          zip -qr ../ios-project.zip HBuilder-Hello SDK
+          cd ..
+          ls -la ios-project.zip
+          echo "=== zip 顶层 ==="
+          unzip -l ios-project.zip | head -8
+
+      - name: Upload to Release (覆盖旧 tag，上传到资产仓库)
+        env:
+          GH_TOKEN: ${{ secrets.ASSET_PAT }}
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::未配置 Secret ASSET_PAT（上传预集成工程到私有资产仓需写权限）"; exit 1; }
+          TAG="${{ inputs.output_release_tag }}"
+          REPO="${{ inputs.asset_repo }}"
+          gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" ios-project.zip \
+            --repo "$REPO" \
+            --title "Pre-integrated iOS project" \
+            --notes "自动生成的预集成 iOS 工程（渠道 ${{ inputs.oem_channel }}）"
+          echo "✅ ios-project.zip 已上传到仓库 $REPO 的 Release $TAG"
