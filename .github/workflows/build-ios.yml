@@ -1,16 +1,11 @@
 name: Build iOS IPA
 
-# 本仓库为 Public 工程仓，只放编排逻辑；项目源码主体在 Gitee 私有仓，CI 运行时用部署私钥浅克隆。
-# 所有敏感信息（Gitee 地址/分支/私钥、iOS 证书/描述文件/Team ID、ASC API Key、DCloud appkey）
-# 全部走 GitHub Secrets，工作流文件与脚本中不出现任何明文敏感值。
-# 双 Job：prepare（ubuntu 免费）做源码构建+工程注入，build（macOS 免费额度）只做 Xcode 编译签名。
 on:
   workflow_dispatch:
     inputs:
       oem_channel:
-        description: 'OEM 渠道 (laiyima / rongyifu / xinglianyun)'
+        description: 'OEM 渠道码（须与 Secret 命名一致）'
         required: true
-        default: 'laiyima'
       version_name:
         description: '版本号 (如 1.0.0)'
         required: true
@@ -52,12 +47,10 @@ env:
   IOS_PROJECT_NAME: 'HBuilder-Hello'
 
 jobs:
-  # ============ Job 1: 源码构建 + 工程注入（ubuntu，免费不计费）============
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # 代码主体在 Gitee 私有仓。地址/分支走 Secret，input 可临时覆盖但不写明文默认值。
       - name: Clone source from Gitee (deploy key)
         env:
           GITEE_SSH_KEY: ${{ secrets.GITEE_SSH_KEY }}
@@ -153,29 +146,22 @@ jobs:
           rm ios-project.zip
           echo "iOS project layout ready"
 
-      # 渠道身份（bundleId/appid/displayName/profileSpecifier）从 Gitee 源码 oem.json 动态读取；
-      # DCloud appkey 按渠道从 Secret 间接引用（DLOUD_APPKEY_<CHANNEL 大写>），全程无明文。
       - name: Compute iOS channel identity
         env:
-          DLOUD_APPKEY_LAIYIMA: ${{ secrets.DLOUD_APPKEY_LAIYIMA }}
-          DLOUD_APPKEY_RONGYIFU: ${{ secrets.DLOUD_APPKEY_RONGYIFU }}
-          DLOUD_APPKEY_XINGLIANYUN: ${{ secrets.DLOUD_APPKEY_XINGLIANYUN }}
+          CHANNEL_APPKEY: ${{ secrets[format('DLOUD_APPKEY_{0}', inputs.oem_channel)] }}
         run: |
           set -eu
           CHANNEL="${{ inputs.oem_channel }}"
           eval "$(bash repo/scripts/ci/read-ios-channel.sh "$PWD/repo" "$CHANNEL")"
           [ -n "$CHANNEL_IOS_BUNDLE_ID" ] || { echo "::error::渠道 bundleId 为空"; exit 1; }
           [ -n "$CHANNEL_IOS_APPID" ] || { echo "::error::渠道 appid 为空"; exit 1; }
-          CH_UP=$(printf '%s' "$CHANNEL" | tr '[:lower:]' '[:upper:]')
-          APPKEY_VAR="DLOUD_APPKEY_${CH_UP}"
-          APPKEY="${!APPKEY_VAR:-}"
-          [ -n "$APPKEY" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 DCloud appkey Secret (DLOUD_APPKEY_${CH_UP})"; exit 1; }
+          APPKEY="${CHANNEL_APPKEY:-}"
+          [ -n "$APPKEY" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 DCloud appkey Secret (DLOUD_APPKEY_${CHANNEL})"; exit 1; }
           echo "DLOUD_APPID=$CHANNEL_IOS_APPID" >> "$GITHUB_ENV"
           echo "IOS_BUNDLE_ID=$CHANNEL_IOS_BUNDLE_ID" >> "$GITHUB_ENV"
           echo "IOS_DISPLAY_NAME=$CHANNEL_IOS_DISPLAY_NAME" >> "$GITHUB_ENV"
           echo "IOS_PROFILE_SPECIFIER=$CHANNEL_IOS_PROFILE_SPECIFIER" >> "$GITHUB_ENV"
           echo "IOS_DCLOUD_APPKEY=$APPKEY" >> "$GITHUB_ENV"
-          # 掩码半敏感值，防止后续步骤意外打印到公开日志
           printf "::add-mask::%s\n" "$CHANNEL_IOS_BUNDLE_ID"
           printf "::add-mask::%s\n" "$CHANNEL_IOS_APPID"
           printf "::add-mask::%s\n" "$APPKEY"
@@ -254,7 +240,6 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-  # ============ Job 2: Xcode 编译签名（macOS，免费额度）============
   build:
     needs: prepare
     runs-on: macos-15
@@ -275,7 +260,6 @@ jobs:
           rm ios-project-prepared.tar
           echo "iOS project layout ready"
 
-      # 从 Gitee 源码里读取渠道身份（build 需要 IOS_PROFILE_SPECIFIER 等）
       - name: Clone Gitee for channel identity
         env:
           GITEE_SSH_KEY: ${{ secrets.GITEE_SSH_KEY }}
@@ -292,20 +276,12 @@ jobs:
           echo "Cloned for channel identity"
 
       - name: Compute iOS channel identity
-        env:
-          DLOUD_APPKEY_LAIYIMA: ${{ secrets.DLOUD_APPKEY_LAIYIMA }}
-          DLOUD_APPKEY_RONGYIFU: ${{ secrets.DLOUD_APPKEY_RONGYIFU }}
-          DLOUD_APPKEY_XINGLIANYUN: ${{ secrets.DLOUD_APPKEY_XINGLIANYUN }}
         run: |
           set -eu
           CHANNEL="${{ inputs.oem_channel }}"
           eval "$(bash repo/scripts/ci/read-ios-channel.sh "$PWD/repo" "$CHANNEL")"
           [ -n "$CHANNEL_IOS_BUNDLE_ID" ] || { echo "::error::渠道 bundleId 为空"; exit 1; }
           [ -n "$CHANNEL_IOS_APPID" ] || { echo "::error::渠道 appid 为空"; exit 1; }
-          CH_UP=$(printf '%s' "$CHANNEL" | tr '[:lower:]' '[:upper:]')
-          APPKEY_VAR="DLOUD_APPKEY_${CH_UP}"
-          APPKEY="${!APPKEY_VAR:-}"
-          [ -n "$APPKEY" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 DCloud appkey Secret"; exit 1; }
           echo "DLOUD_APPID=$CHANNEL_IOS_APPID" >> "$GITHUB_ENV"
           echo "IOS_BUNDLE_ID=$CHANNEL_IOS_BUNDLE_ID" >> "$GITHUB_ENV"
           echo "IOS_DISPLAY_NAME=$CHANNEL_IOS_DISPLAY_NAME" >> "$GITHUB_ENV"
@@ -557,9 +533,6 @@ jobs:
 
           echo ""
           echo "--- feature.plist 插件注册条目（requireNativePlugin 映射）---"
-          # 这是 requireNativePlugin 能否返回非空的决定性检查：
-          # 即使 DMMonitor 类已编译进二进制，feature.plist 缺注册条目仍会导致
-          # requireNativePlugin 返回 null（plugin object: unresolved; methods: none）。
           FEATURE_PLIST=$(find "$APP_DIR" -name "feature.plist" -path "*PandoraApi*" 2>/dev/null | head -1)
           if [ -z "$FEATURE_PLIST" ]; then
             echo "::error::IPA 内未找到 PandoraApi.bundle/feature.plist"

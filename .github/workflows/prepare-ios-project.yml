@@ -1,9 +1,5 @@
 name: Prepare iOS Pre-integrated Project
 
-# 一次性（或工程/SDK 变更时重跑）：把瘦身 SDK + 原生插件集成为预集成工程，
-# 打成 ios-project.zip 上传 Release，供 build-ios workflow 使用。
-# 本仓库为 Public：身份（bundleId/appid/displayName）由 compute 步骤从 Gitee 源码
-# oem.json 动态读取，DCloud appkey 按渠道从 Secret 间接引用，工作流全程无明文。
 on:
   workflow_dispatch:
     inputs:
@@ -26,9 +22,8 @@ on:
         required: true
         default: 'MobileVLCKit.xcframework.tar.gz'
       oem_channel:
-        description: 'OEM 渠道 (laiyima / rongyifu / xinglianyun)，决定预集成工程的 iOS 身份'
+        description: 'OEM 渠道码（须与 Secret 命名一致），决定预集成工程的 iOS 身份'
         required: true
-        default: 'laiyima'
       output_release_tag:
         description: '产出预集成工程的 Release tag'
         required: true
@@ -105,22 +100,17 @@ jobs:
           [ "$ok" = "1" ] || { echo "::error::Gitee 克隆 3 次均失败"; exit 1; }
           echo "Cloned nativeplugins"
 
-      # 渠道身份从 Gitee 源码 oem.json 动态读取；DCloud appkey 按渠道从 Secret 间接引用。
       - name: Compute iOS channel identity
         env:
-          DLOUD_APPKEY_LAIYIMA: ${{ secrets.DLOUD_APPKEY_LAIYIMA }}
-          DLOUD_APPKEY_RONGYIFU: ${{ secrets.DLOUD_APPKEY_RONGYIFU }}
-          DLOUD_APPKEY_XINGLIANYUN: ${{ secrets.DLOUD_APPKEY_XINGLIANYUN }}
+          CHANNEL_APPKEY: ${{ secrets[format('DLOUD_APPKEY_{0}', inputs.oem_channel)] }}
         run: |
           set -eu
           CHANNEL="${{ inputs.oem_channel }}"
           eval "$(bash repo/scripts/ci/read-ios-channel.sh "$PWD/repo" "$CHANNEL")"
           [ -n "$CHANNEL_IOS_BUNDLE_ID" ] || { echo "::error::渠道 bundleId 为空"; exit 1; }
           [ -n "$CHANNEL_IOS_APPID" ] || { echo "::error::渠道 appid 为空"; exit 1; }
-          CH_UP=$(printf '%s' "$CHANNEL" | tr '[:lower:]' '[:upper:]')
-          APPKEY_VAR="DLOUD_APPKEY_${CH_UP}"
-          APPKEY="${!APPKEY_VAR:-}"
-          [ -n "$APPKEY" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 DCloud appkey Secret (DLOUD_APPKEY_${CH_UP})"; exit 1; }
+          APPKEY="${CHANNEL_APPKEY:-}"
+          [ -n "$APPKEY" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 DCloud appkey Secret (DLOUD_APPKEY_${CHANNEL})"; exit 1; }
           echo "IOS_BUNDLE_ID=$CHANNEL_IOS_BUNDLE_ID" >> "$GITHUB_ENV"
           echo "IOS_DISPLAY_NAME=$CHANNEL_IOS_DISPLAY_NAME" >> "$GITHUB_ENV"
           echo "DLOUD_APPID=$CHANNEL_IOS_APPID" >> "$GITHUB_ENV"
@@ -236,10 +226,6 @@ jobs:
           fi
 
       - name: Inject feature.plist (native plugin registration)
-        # DCloud iOS SDK 通过 PandoraApi.bundle/feature.plist 把 JS 模块名映射到
-        # 原生 ObjC 类。缺它 requireNativePlugin 返回 null（plugin object: unresolved;
-        # methods: none），即使源码已编译进二进制、UNI_EXPORT_METHOD 宏已生效。
-        # 对应 docs/ios-preintegrated-project-setup.md 步骤 4（此前 CI 漏掉了这步）。
         run: |
           cd sdk-root
           python3 "$GITHUB_WORKSPACE/scripts/ci/inject-ios-feature-plist.py" .
@@ -331,8 +317,6 @@ jobs:
           fi
           echo "✅ 插件目录有 $PLUGIN_FILES 个 .m 源文件"
 
-          # 5. 检查 feature.plist 插件注册条目（requireNativePlugin 能否返回非空的关键）
-          #    没有它，即使源码编译进二进制、宏生效，requireNativePlugin 仍返回 null
           echo "--- 验证 feature.plist 插件注册 ---"
           FEATURE_PLIST=$(find sdk-root -name "feature.plist" -path "*PandoraApi*" -not -path "*/Examples/*" -not -path "*/Samples/*" 2>/dev/null | head -1)
           if [ -z "$FEATURE_PLIST" ]; then

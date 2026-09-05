@@ -36,19 +36,19 @@
 
 | Secret 名 | 渠道 | 取值说明 |
 |---|---|---|
-| `DLOUD_APPKEY_LAIYIMA` | 来一码 | DCloud 控制台对应 appid 下发的 iOS appkey |
-| `DLOUD_APPKEY_RONGYIFU` | 融易付 | 同上 |
-| `DLOUD_APPKEY_XINGLIANYUN` | 湾驱智联云 | 同上 |
+| `DLOUD_APPKEY_laiyima` | 来一码 | DCloud 控制台对应 appid 下发的 iOS appkey |
+| `DLOUD_APPKEY_rongyifu` | 融易付 | 同上 |
+| `DLOUD_APPKEY_xinglianyun` | 湾驱智联云 | 同上 |
 
-> 工作流按 `oem_channel` 转大写后间接引用 `DLOUD_APPKEY_<CHANNEL>`，故 Secret 名必须全大写渠道码。
+> 工作流用 `secrets[format('DLOUD_APPKEY_{0}', inputs.oem_channel)]` 动态拼接，Secret 名渠道部分须与 input 值（小写）一致，工作流中不写死任何渠道名。
 
 ### 渠道 bundleId（仅 diagnose 诊断用，可选）
 
 | Secret 名 | 渠道 | 说明 |
 |---|---|---|
-| `IOS_BUNDLE_ID_LAIYIMA` | 来一码 | iOS bundleId（= Android applicationId） |
-| `IOS_BUNDLE_ID_RONGYIFU` | 融易付 | 同上 |
-| `IOS_BUNDLE_ID_XINGLIANYUN` | 湾驱智联云 | 同上 |
+| `IOS_BUNDLE_ID_laiyima` | 来一码 | iOS bundleId（= Android applicationId） |
+| `IOS_BUNDLE_ID_rongyifu` | 融易付 | 同上 |
+| `IOS_BUNDLE_ID_xinglianyun` | 湾驱智联云 | 同上 |
 
 > `build-ios` / `prepare-ios-project` 的 bundleId 运行时从 Gitee 源码 `oem_config/<channel>/oem.json` 动态读取，**无需**配这些 Secret；仅 `diagnose-asc.yml`（不克隆 Gitee）需要。
 
