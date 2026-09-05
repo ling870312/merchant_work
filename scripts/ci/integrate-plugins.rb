@@ -140,23 +140,46 @@ end.each do |ref|
 end
 
 # 5) build settings
-# 自动定位真实 DCloud 头 DCUniModule.h 所在目录，加入 HEADER_SEARCH_PATHS。
-# 目的：让 DMMonitorPlayerModule 等插件源码编译时命中真实 DCUniModule.h，
-# 使 UNI_EXPORT_METHOD 真正生效（否则回落 DMMonitorPluginCompat.h 桩实现，
-# 方法不会注册到 uni 运行时，JS 端 requireNativePlugin 拿到空对象 methods: none）。
+# 定位 DCloud 原生插件头文件目录，加入 HEADER_SEARCH_PATHS。
+#
+# UNI_EXPORT_METHOD / UNI_EXPORT_METHOD_SYNC 宏定义在 DCUniDefine.h，
+# DCUniModule.h 只是基类声明。DMMonitorPluginCompat.h 会同时 import 两者，
+# 任一未命中真实头，宏就退化为空操作（桩实现），插件方法不注册到 uni 运行时，
+# JS 端 requireNativePlugin 拿到 null（methods: none）。
+# 因此必须同时把 DCUniDefine.h 与 DCUniModule.h 所在目录写入 HEADER_SEARCH_PATHS。
 #
 # Xcode 工程在 HBuilder-Hello/HBuilder-Hello.xcodeproj，所以
 #   $(PROJECT_DIR) = $(SRCROOT) = sdk-root/HBuilder-Hello
-# DCUniModule.h 通常在 SDK/ 目录下（sdk-root/SDK/...），在 PROJECT_DIR 之外，
-# 因此必须用 $(SRCROOT)/.. 回到 sdk-root 再拼接，而不能直接 reject 掉。
+# 头文件通常在 SDK/ 目录下（sdk-root/SDK/inc/...），在 PROJECT_DIR 之外，
+# 必须用 $(SRCROOT)/.. 回到 sdk-root 再拼接，不能直接 reject 掉。
 project_dir_real = File.expand_path('HBuilder-Hello')
 sdk_root_real = File.expand_path('.')
-dcmodule_hdrs = Dir.glob(File.join('HBuilder-Hello', '**', 'DCUniModule.h'))
-  .concat(Dir.glob(File.join('SDK', '**', 'DCUniModule.h')))
-  .concat(Dir.glob(File.join('**', 'DCUniModule.h')))
+
+# 同时搜集宏定义头(DCUniDefine.h)与基类头(DCUniModule.h)的所有命中目录
+dcmodule_hdrs = []
+%w[DCUniDefine.h DCUniModule.h].each do |hdr|
+  dcmodule_hdrs.concat(Dir.glob(File.join('HBuilder-Hello', '**', hdr)))
+  dcmodule_hdrs.concat(Dir.glob(File.join('SDK', '**', hdr)))
+  dcmodule_hdrs.concat(Dir.glob(File.join('**', hdr)))
+end
 dcmodule_dirs = dcmodule_hdrs
   .map { |hdr| File.dirname(File.expand_path(hdr)) }
   .uniq
+
+# 显式探测 DCloud iOS 离线 SDK 标准头目录（4.x SDK 通常在 SDK/inc/ 下，
+# 含 DCUniDefine.h / DCUniModule.h）。glob 在 framework Headers 等场景
+# 偶发漏命中时兜底，避免因搜索失败而放弃写入 HEADER_SEARCH_PATHS。
+%w[
+  SDK/inc
+  SDK/inc/DCUni
+  SDK/inc/include
+  SDK/Headers
+  SDK/inc/Weex
+  HBuilder-Hello/HBuilder-Hello/inc
+].each do |d|
+  next unless File.directory?(d)
+  dcmodule_dirs |= [File.expand_path(d)]
+end
 
 header_search = dcmodule_dirs.map do |dir|
   rel_to_project = Pathname.new(dir).relative_path_from(Pathname.new(project_dir_real)).to_s
@@ -170,12 +193,13 @@ header_search = dcmodule_dirs.map do |dir|
 end
 
 if header_search.empty?
-  puts 'DCUniModule.h: 未定位到真实头，插件将回退 DMMonitorPluginCompat 兼容桩'
-  puts "DCUniModule.h: 搜索范围 HBuilder-Hello/**/*.h + SDK/**/*.h + **/*.h"
-  puts "DCUniModule.h: sdk-root = #{sdk_root_real}"
-  puts "DCUniModule.h: project_dir = #{project_dir_real}"
+  puts 'DCloud 头文件: 未定位到 DCUniDefine.h/DCUniModule.h，插件将回退 DMMonitorPluginCompat 兼容桩'
+  puts 'DCloud 头文件: 这会导致 UNI_EXPORT_METHOD 宏失效，插件方法不注册，requireNativePlugin 返回 null'
+  puts "DCloud 头文件: 搜索范围 DCUniDefine.h + DCUniModule.h（HBuilder-Hello/** + SDK/** + **）"
+  puts "DCloud 头文件: sdk-root = #{sdk_root_real}"
+  puts "DCloud 头文件: project_dir = #{project_dir_real}"
 else
-  puts "DCUniModule.h: 命中真实头，HEADER_SEARCH_PATHS += #{header_search.inspect}"
+  puts "DCloud 头文件: 命中真实头，HEADER_SEARCH_PATHS += #{header_search.inspect}"
 end
 
 # MobileVLCKit.xcframework 所在目录，供链接器搜索（ld: framework not found）

@@ -556,6 +556,32 @@ jobs:
           fi
 
           echo ""
+          echo "--- feature.plist 插件注册条目（requireNativePlugin 映射）---"
+          # 这是 requireNativePlugin 能否返回非空的决定性检查：
+          # 即使 DMMonitor 类已编译进二进制，feature.plist 缺注册条目仍会导致
+          # requireNativePlugin 返回 null（plugin object: unresolved; methods: none）。
+          FEATURE_PLIST=$(find "$APP_DIR" -name "feature.plist" -path "*PandoraApi*" 2>/dev/null | head -1)
+          if [ -z "$FEATURE_PLIST" ]; then
+            echo "::error::IPA 内未找到 PandoraApi.bundle/feature.plist"
+            echo "::error::requireNativePlugin 将返回 null，监控插件无法使用"
+            exit 1
+          fi
+          echo "feature.plist: $FEATURE_PLIST"
+          python3 -c "
+          import plistlib, sys
+          pl = plistlib.load(open(sys.argv[1],'rb'))
+          ok = True
+          for name in ['DoorMaster-Monitor-Player','doorMasterMonitorPlayerView']:
+              entry = pl.get(name)
+              if not entry:
+                  print(f'::error::feature.plist 缺少 {name} 注册条目')
+                  ok = False
+              else:
+                  print(f'  ✅ {name} -> {entry}')
+          sys.exit(0 if ok else 1)
+          " "$FEATURE_PLIST"
+
+          echo ""
           echo "========== 5. MobileVLCKit framework =========="
           if [ -d "$APP_DIR/Frameworks/MobileVLCKit.framework" ] || \
              find "$APP_DIR/Frameworks" -name "*VLC*" -type d 2>/dev/null | grep -q .; then

@@ -182,6 +182,25 @@ jobs:
           find SDK -name "DCUniModule.h" -type f 2>/dev/null || true
           echo "--- 全局搜索（排除 .git）---"
           find . -name "DCUniModule.h" -type f -not -path '*/.git/*' 2>/dev/null || true
+          echo ""
+          echo "=== 搜索 DCUniDefine.h（UNI_EXPORT_METHOD 宏定义所在）==="
+          echo "DMMonitorPluginCompat.h 同时 import DCUniDefine.h 与 DCUniModule.h；"
+          echo "DCUniDefine.h 未命中 → UNI_EXPORT_METHOD 退化为空宏 → 方法不注册。"
+          echo "--- HBuilder-Hello 子目录 ---"
+          find HBuilder-Hello -name "DCUniDefine.h" -type f 2>/dev/null || true
+          echo "--- SDK 子目录 ---"
+          find SDK -name "DCUniDefine.h" -type f 2>/dev/null || true
+          echo "--- 全局搜索（排除 .git）---"
+          find . -name "DCUniDefine.h" -type f -not -path '*/.git/*' 2>/dev/null || true
+          echo ""
+          echo "--- 检查 DCUniDefine.h 是否定义 UNI_EXPORT_METHOD ---"
+          DEF_FILE=$(find . -name "DCUniDefine.h" -type f -not -path '*/.git/*' 2>/dev/null | head -1)
+          if [ -n "$DEF_FILE" ]; then
+            echo "文件: $DEF_FILE"
+            grep -n "UNI_EXPORT_METHOD\|UNI_EXPORT_METHOD_SYNC" "$DEF_FILE" 2>/dev/null || echo "(此文件未定义，可能再 include 其他头)"
+          else
+            echo "::error::未找到 DCUniDefine.h，UNI_EXPORT_METHOD 宏可能失效"
+          fi
           DCU_FILE=$(find . -name "DCUniModule.h" -type f -not -path '*/.git/*' 2>/dev/null | head -1)
           if [ -n "$DCU_FILE" ]; then
             echo "文件: $DCU_FILE"
@@ -198,6 +217,8 @@ jobs:
           ls -la
           echo "SDK/inc/DCUni 内容:"
           ls -la SDK/inc/DCUni/ 2>/dev/null || echo "无 DCUni 目录"
+          echo "SDK/inc 内容:"
+          ls -la SDK/inc/ 2>/dev/null || echo "无 SDK/inc 目录"
 
       - name: Integrate plugins (Ruby xcodeproj)
         env:
@@ -213,6 +234,28 @@ jobs:
             echo "::error::project.pbxproj 不存在: $PROJ"
             exit 1
           fi
+
+      - name: Inject feature.plist (native plugin registration)
+        # DCloud iOS SDK 通过 PandoraApi.bundle/feature.plist 把 JS 模块名映射到
+        # 原生 ObjC 类。缺它 requireNativePlugin 返回 null（plugin object: unresolved;
+        # methods: none），即使源码已编译进二进制、UNI_EXPORT_METHOD 宏已生效。
+        # 对应 docs/ios-preintegrated-project-setup.md 步骤 4（此前 CI 漏掉了这步）。
+        run: |
+          cd sdk-root
+          python3 "$GITHUB_WORKSPACE/scripts/ci/inject-ios-feature-plist.py" .
+          echo "=== feature.plist 注册条目验证 ==="
+          PLIST=$(find . -name "feature.plist" -path "*PandoraApi*" -not -path "*/Examples/*" -not -path "*/Samples/*" 2>/dev/null | head -1)
+          if [ -z "$PLIST" ]; then
+            echo "::error::inject 后仍未找到 PandoraApi.bundle/feature.plist"
+            exit 1
+          fi
+          echo "feature.plist: $PLIST"
+          python3 -c "
+          import plistlib, sys
+          pl = plistlib.load(open(sys.argv[1],'rb'))
+          for name in ['DoorMaster-Monitor-Player','doorMasterMonitorPlayerView']:
+              print(f'  {name} -> {pl.get(name)}')
+          " "$PLIST" 2>/dev/null || echo "(解析失败，但文件存在)"
 
       - name: Configure Info.plist and control.xml
         run: |
@@ -287,6 +330,30 @@ jobs:
             exit 1
           fi
           echo "✅ 插件目录有 $PLUGIN_FILES 个 .m 源文件"
+
+          # 5. 检查 feature.plist 插件注册条目（requireNativePlugin 能否返回非空的关键）
+          #    没有它，即使源码编译进二进制、宏生效，requireNativePlugin 仍返回 null
+          echo "--- 验证 feature.plist 插件注册 ---"
+          FEATURE_PLIST=$(find sdk-root -name "feature.plist" -path "*PandoraApi*" -not -path "*/Examples/*" -not -path "*/Samples/*" 2>/dev/null | head -1)
+          if [ -z "$FEATURE_PLIST" ]; then
+            echo "::error::未找到 PandoraApi.bundle/feature.plist，原生插件无法注册到 uni 运行时"
+            echo "::error::requireNativePlugin 将返回 null (plugin object: unresolved; methods: none)"
+            exit 1
+          fi
+          echo "feature.plist: $FEATURE_PLIST"
+          python3 -c "
+          import plistlib, sys
+          pl = plistlib.load(open(sys.argv[1],'rb'))
+          ok = True
+          for name in ['DoorMaster-Monitor-Player','doorMasterMonitorPlayerView']:
+              entry = pl.get(name)
+              if not entry:
+                  print(f'::error::feature.plist 缺少 {name} 注册条目')
+                  ok = False
+              else:
+                  print(f'  ✅ {name} -> {entry}')
+          sys.exit(0 if ok else 1)
+          " "$FEATURE_PLIST"
 
       - name: Package ios-project.zip
         run: |
