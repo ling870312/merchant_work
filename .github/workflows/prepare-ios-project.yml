@@ -360,11 +360,17 @@ jobs:
       - name: Package ios-project.zip
         run: |
           cd sdk-root
-          # -0 = store（不压缩）：SDK 多为框架二进制压不动，deflate 纯耗 CPU。
-          # 打包与后续 unzip 均近秒级；体积与压缩版几乎一致，build 侧无需改动。
-          zip -0 -r ../ios-project.zip HBuilder-Hello SDK
+          # 使用中等压缩模式 (-6) 减少文件大小，同时控制执行时间
+          # 避免超过 GitHub 2GB 限制，同时不会因过度压缩而耗时太久
+          zip -r -6 ../ios-project.zip HBuilder-Hello SDK
           cd ..
           ls -la ios-project.zip
+          SIZE=$(stat -c%s ios-project.zip)
+          echo "压缩包大小: $SIZE 字节 ($(echo "scale=2; $SIZE/1024/1024/1024" | bc) GB)"
+          if [ $SIZE -gt 2147483648 ]; then
+            echo "::error::压缩包超过 2GB 限制，考虑删除不必要的大文件"
+            exit 1
+          fi
           echo "=== zip 顶层 ==="
           unzip -l ios-project.zip | head -8
 
