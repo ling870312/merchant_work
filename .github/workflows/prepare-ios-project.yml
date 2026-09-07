@@ -365,7 +365,7 @@ jobs:
           zip -r -6 ../ios-project.zip HBuilder-Hello SDK
           cd ..
           ls -la ios-project.zip
-          SIZE=$(stat -c%s ios-project.zip)
+          SIZE=$(stat -f%z ios-project.zip)
           echo "压缩包大小: $SIZE 字节 ($(echo "scale=2; $SIZE/1024/1024/1024" | bc) GB)"
           if [ $SIZE -gt 2147483648 ]; then
             echo "::error::压缩包超过 2GB 限制，考虑删除不必要的大文件"
