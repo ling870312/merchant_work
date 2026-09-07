@@ -1,0 +1,1026 @@
+name: Build iOS IPA (All-in-One)
+
+# =============================================================================
+# 单工作流全链路 iOS 打包
+#
+# 源码构建 → 下载瘦身 SDK → 集成原生插件 → 配置身份 → 签名 → Archive
+#          → 深度校验 → 上传 App Store Connect
+#
+# 相比旧的 prepare-ios-project.yml + build-ios.yml 两段式，本工作流解决两个问题：
+#
+# 【1】陈旧宿主问题
+#     旧 build-ios.yml 只做「下载预集成 zip → 塞 www → 签名打包」，全程不碰原生
+#     插件。宿主完全是 prepare 冻结在 Release tag 上的那份，反复重跑 Build 只会
+#     反复得到同一个坏宿主（线上表现为"当前 iOS 宿主未集成监控播放原生插件"）。
+#     本工作流每次都从瘦身 SDK 重新集成，不存在复用陈旧宿主的可能。
+#
+# 【2】开源仓库的敏感信息落盘问题
+#     公开仓库的 Release 资产与 Actions Artifact 任何人可下载。旧流程会把写入了
+#     dcloud_appkey / bundleId 的 ios-project.zip 上传 Release、把 ios-project-
+#     prepared.tar 上传 Artifact，等于把渠道密钥挂到公网。本工作流：
+#       - 不上传任何工程压缩包，工程只存在于 runner 临时盘
+#       - Gitee deploy key 用完立即删除
+#       - 末尾 always() 清理 p12 / 描述文件 / ASC 私钥 / xcarchive
+#       - IPA / dSYM Artifact 默认关闭，并在 input 描述中标注公开下载风险
+#
+# 依赖的 CI 脚本（全部来自本仓库 scripts/ci/，均在 macOS 原生可用）：
+#   read-ios-channel.sh        渠道身份解析
+#   integrate-plugins.rb       xcodeproj 集成插件源码 + HEADER_SEARCH_PATHS
+#   inject-ios-feature-plist.py 写 PandoraApi.bundle/feature.plist 注册表
+#   inject-ios-config.py       改 Info.plist（替代 macOS 专有 PlistBuddy）
+#   clean-privacy-strings.py   清理冗余隐私描述
+#   sync-ios-appicons.sh       App 图标注入（sips 可用则用，否则 cp）
+#   install-ios-signing.sh     钥匙串 + p12 + 描述文件安装
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      oem_channel:
+        description: 'OEM 渠道码（须与 Secret 命名一致）'
+        required: true
+      version_name:
+        description: '版本号 (如 1.0.0)'
+        required: true
+        default: '1.0.0'
+      version_code:
+        description: '构建号 (如 1)'
+        required: true
+        default: '1'
+      sdk_release_tag:
+        description: '瘦身 SDK 的 Release tag（只读下载，不回写）'
+        required: true
+        default: 'ios-sdk-slim'
+      mobilevlc_release_tag:
+        description: 'MobileVLCKit 二进制的 Release tag（H265/RTMP 高级流播放内核）'
+        required: true
+        default: 'ios-mobilevlc-v1'
+      mobilevlc_asset_name:
+        description: 'MobileVLCKit 资产文件名（解压后是 .xcframework）'
+        required: true
+        default: 'MobileVLCKit.xcframework.tar.gz'
+      asset_repo:
+        description: '资产仓库（仅只读下载 SDK/MobileVLCKit，本工作流不再向其写入）'
+        required: false
+        default: 'ling870312/merchant_uniapp_v3'
+      gitee_repo:
+        description: 'Gitee 仓库 SSH 地址（留空则用 Secret GITEE_REPO）'
+        required: false
+      gitee_branch:
+        description: 'Gitee 分支（留空则用 Secret GITEE_BRANCH）'
+        required: false
+      upload_to_asc:
+        description: '出 IPA 后是否自动上传到 App Store Connect'
+        required: false
+        type: boolean
+        default: true
+      build_adhoc:
+        description: '是否同时出 ad-hoc 测试包（额外约 3 分钟）'
+        required: false
+        type: boolean
+        default: false
+      upload_ipa_artifact:
+        description: '⚠️ 公开仓库 Artifact 任何人可下载，IPA 内含 appkey 与签名信息，非必要勿开'
+        required: false
+        type: boolean
+        default: false
+      upload_dsym_artifact:
+        description: '⚠️ 公开仓库 Artifact 任何人可下载；dSYM 已随 uploadSymbols 提交 ASC'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-allinone-${{ inputs.oem_channel }}
+  cancel-in-progress: true
+
+env:
+  IOS_SCHEME: 'HBuilder'
+  IOS_PROJECT_NAME: 'HBuilder-Hello'
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 75
+    steps:
+      # -----------------------------------------------------------------------
+      # 阶段 0：取本仓库 CI 脚本
+      # -----------------------------------------------------------------------
+      - name: Checkout (CI 脚本)
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 阶段 1：拉取业务源码并构建 uni-app 资源
+      # -----------------------------------------------------------------------
+      - name: Clone source from Gitee (deploy key)
+        env:
+          GITEE_SSH_KEY: ${{ secrets.GITEE_SSH_KEY }}
+          GITEE_REPO: ${{ inputs.gitee_repo || secrets.GITEE_REPO }}
+          GITEE_BRANCH: ${{ inputs.gitee_branch || secrets.GITEE_BRANCH }}
+        run: |
+          set -eu
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$GITEE_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          if [ ! -s ~/.ssh/id_ed25519 ]; then
+            echo "::error::GITEE_SSH_KEY 为空，请检查 GitHub Secret"
+            exit 1
+          fi
+          [ -n "$GITEE_REPO" ] || { echo "::error::Gitee 仓库地址为空（未配置 GITEE_REPO Secret 且 input 留空）"; exit 1; }
+          [ -n "$GITEE_BRANCH" ] || { echo "::error::Gitee 分支为空（未配置 GITEE_BRANCH Secret 且 input 留空）"; exit 1; }
+          ssh-keyscan -t ed25519 gitee.com >> ~/.ssh/known_hosts 2>/dev/null || true
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/id_ed25519"
+          ok=0
+          for i in 1 2 3; do
+            if git clone --depth 1 -b "$GITEE_BRANCH" "$GITEE_REPO" repo; then ok=1; break; fi
+            echo "第 $i 次克隆失败，10 秒后重试..."
+            rm -rf repo; sleep 10
+          done
+          # 克隆完成立即销毁私钥，缩短敏感文件在磁盘上的存活时间
+          rm -f ~/.ssh/id_ed25519
+          [ "$ok" = "1" ] || { echo "::error::Gitee 克隆 3 次均失败"; exit 1; }
+          # 导出分支名供后续溯源步骤使用（分支名非敏感，仓库 SSH 地址不导出）
+          echo "GITEE_BRANCH_RESOLVED=$GITEE_BRANCH" >> "$GITHUB_ENV"
+          echo "Cloned $(find repo -maxdepth 1 -mindepth 1 -type d | wc -l) top-level dirs"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'repo/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: repo
+
+      - name: Apply OEM config (${{ inputs.oem_channel }})
+        run: pwsh -ExecutionPolicy Bypass -File scripts/apply-oem-config.ps1 -OemChannel "${{ inputs.oem_channel }}" -SkipSigning
+        shell: bash
+        working-directory: repo
+
+      - name: Sync theme assets (tabbar icons)
+        run: pwsh -ExecutionPolicy Bypass -File scripts/sync-theme-assets.ps1
+        shell: bash
+        working-directory: repo
+        continue-on-error: true
+
+      - name: Set versionChannel=release in appBuildInfo.json
+        run: |
+          python3 -c "
+          import json
+          p = 'src/config/appBuildInfo.json'
+          with open(p, 'r', encoding='utf-8') as f:
+              d = json.load(f)
+          d['versionChannel'] = 'release'
+          with open(p, 'w', encoding='utf-8') as f:
+              json.dump(d, f, indent=2)
+          print('versionChannel=release')
+          "
+        working-directory: repo
+
+      - name: Build Uni-app App resources
+        run: npx uni build -p app
+        shell: bash
+        working-directory: repo
+        env:
+          NODE_ENV: production
+
+      - name: Verify app resources
+        run: |
+          if [ ! -d "dist/build/app" ]; then
+            echo "::error::dist/build/app 不存在，Uni-app 资源构建失败"
+            exit 1
+          fi
+          echo "App resources built"
+        working-directory: repo
+
+      # -----------------------------------------------------------------------
+      # 阶段 2：下载瘦身 SDK 与播放内核
+      # -----------------------------------------------------------------------
+      - name: Install xcodeproj gem
+        run: gem install xcodeproj --no-document
+
+      - name: Download slim SDK
+        env:
+          GH_TOKEN: ${{ secrets.ASSET_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::未配置 Secret ASSET_PAT（下载私有仓资产用）"; exit 1; }
+          gh release download "${{ inputs.sdk_release_tag }}" \
+            --repo "${{ inputs.asset_repo }}" \
+            --pattern "ios-sdk-slim.tar.gz" --clobber --dir .
+          echo "下载大小: $(wc -c < ios-sdk-slim.tar.gz) 字节"
+          mkdir -p sdk-root
+          tar -xzf ios-sdk-slim.tar.gz -C sdk-root
+          rm -f ios-sdk-slim.tar.gz
+          echo "SDK 解压完成"
+          ls sdk-root/SDK/Bundles/weex-polyfill.js sdk-root/SDK/Bundles/PandoraApi.bundle
+
+      - name: Download MobileVLCKit (advanced monitor playback core)
+        env:
+          GH_TOKEN: ${{ secrets.ASSET_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::未配置 Secret ASSET_PAT（下载私有仓资产用）"; exit 1; }
+          VLC_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello/PlugIns/MobileVLCKit"
+          mkdir -p "$VLC_DIR"
+          if ! gh release download "${{ inputs.mobilevlc_release_tag }}" \
+              --repo "${{ inputs.asset_repo }}" \
+              --pattern "${{ inputs.mobilevlc_asset_name }}" --clobber --dir .; then
+            echo "::error::未找到 MobileVLCKit 资产（仓库 ${{ inputs.asset_repo }} / Release ${{ inputs.mobilevlc_release_tag }}）。"
+            exit 1
+          fi
+          tar -xzf "${{ inputs.mobilevlc_asset_name }}" -C "$VLC_DIR"
+          rm -f "${{ inputs.mobilevlc_asset_name }}"
+          echo "MobileVLCKit 就位"
+
+      - name: Copy plugins into project
+        run: |
+          T=sdk-root/HBuilder-Hello/HBuilder-Hello
+          mkdir -p "$T/PlugIns/DoorMasterMonitorPlayer"
+          cp repo/nativeplugins/DoorMaster-Monitor-Player/ios/*.h "$T/PlugIns/DoorMasterMonitorPlayer/" 2>/dev/null || true
+          cp repo/nativeplugins/DoorMaster-Monitor-Player/ios/*.m "$T/PlugIns/DoorMasterMonitorPlayer/"
+          echo "插件文件已就位"
+          ls "$T/PlugIns/DoorMasterMonitorPlayer" | head
+
+      # -----------------------------------------------------------------------
+      # 阶段 2.5：来源溯源 + 插件源码与 manifest 声明的强一致性校验
+      #
+      # 目的：本工作流是双仓结构，插件源码来自 Gitee 克隆（repo/），CI 集成脚本
+      # 来自本仓库（actions/checkout）。最常见的"改了却没打进去"故障是改动只推到
+      # 了其中一个仓库。这里把两个仓库的 commit 都打进日志，并强校验 manifest.json
+      # 声明的每个 iOS 原生类都有对应 .m 源文件、且已被真正拷进工程目录。
+      # -----------------------------------------------------------------------
+      - name: Verify plugin provenance and manifest consistency
+        run: |
+          set -u
+          echo "========== 1. 来源溯源（出问题时先看这两行 commit）=========="
+          echo "--- 业务源码 / 原生插件（Gitee 仓）---"
+          if [ -d repo/.git ]; then
+            echo "  branch : $GITEE_BRANCH_RESOLVED"
+            echo "  commit : $(git -C repo rev-parse HEAD 2>/dev/null || echo '<unknown>')"
+            echo "  date   : $(git -C repo log -1 --format=%cd 2>/dev/null || echo '<unknown>')"
+            echo "  subject: $(git -C repo log -1 --format=%s 2>/dev/null || echo '<unknown>')"
+          else
+            echo "::warning::repo/.git 不存在（浅克隆已剥离？），无法输出业务源码 commit"
+          fi
+          echo "--- CI 集成脚本（本工作流仓）---"
+          echo "  commit : ${GITHUB_SHA:-<unknown>}"
+          echo "  ref    : ${GITHUB_REF:-<unknown>}"
+
+          echo ""
+          echo "========== 2. 插件源码目录清点 =========="
+          SRC_DIR="repo/nativeplugins/DoorMaster-Monitor-Player/ios"
+          DST_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello/PlugIns/DoorMasterMonitorPlayer"
+          if [ ! -d "$SRC_DIR" ]; then
+            echo "::error::插件源码目录不存在: $SRC_DIR"
+            echo "::error::请确认原生插件改动已推送到 Gitee 仓的 $GITEE_BRANCH_RESOLVED 分支"
+            exit 1
+          fi
+          SRC_M=$(ls "$SRC_DIR"/*.m 2>/dev/null | wc -l | tr -d ' ')
+          SRC_H=$(ls "$SRC_DIR"/*.h 2>/dev/null | wc -l | tr -d ' ')
+          DST_M=$(ls "$DST_DIR"/*.m 2>/dev/null | wc -l | tr -d ' ')
+          echo "  源码目录: ${SRC_M} 个 .m / ${SRC_H} 个 .h"
+          echo "  工程目录: ${DST_M} 个 .m"
+          if [ "$SRC_M" -eq 0 ]; then
+            echo "::error::$SRC_DIR 下没有任何 .m 源文件，插件无法编译"
+            exit 1
+          fi
+          if [ "$SRC_M" != "$DST_M" ]; then
+            echo "::error::拷贝数量不一致（源 $SRC_M ≠ 工程 $DST_M），cp 步骤可能部分失败"
+            exit 1
+          fi
+          echo "✅ 插件源码已全部拷入工程目录"
+
+          echo ""
+          echo "========== 3. manifest.json 声明 ↔ 源文件 强校验 =========="
+          # manifest.json 的 app-plus.nativePlugins.<id>.ios.plugins[].class 就是
+          # JS 端 requireNativePlugin 最终要解析到的原生类。这里逐个确认：
+          #   a) 该类有同名 .m 文件存在于插件源码目录
+          #   b) 该 .m 文件已被拷进工程目录（会进 Xcode 编译源）
+          # 任一条不满足即硬失败，避免打出"manifest 声明了但二进制里没有"的坏包。
+          python3 - "$SRC_DIR" "$DST_DIR" <<'PY'
+          import json, os, sys
+          src_dir, dst_dir = sys.argv[1], sys.argv[2]
+          mf = 'repo/src/manifest.json'
+          if not os.path.isfile(mf):
+              print(f'::error::未找到 {mf}'); sys.exit(1)
+          d = json.load(open(mf, encoding='utf-8'))
+          nps = (d.get('app-plus') or {}).get('nativePlugins') or {}
+          if not nps:
+              print('::error::manifest.json 未声明任何 app-plus.nativePlugins'); sys.exit(1)
+
+          fail = False
+          for pid, cfg in nps.items():
+              ios = (cfg or {}).get('ios') or {}
+              plugins = ios.get('plugins') or []
+              print(f'插件 {pid}: integrateType={ios.get("integrateType")} 声明 {len(plugins)} 个条目')
+              if not plugins:
+                  print(f'::error::{pid} 的 ios.plugins 为空，运行时无法解析'); fail = True; continue
+              for p in plugins:
+                  cls, ptype, pname = p.get('class'), p.get('type'), p.get('name')
+                  if not cls:
+                      print(f'::error::{pid} 存在缺少 class 字段的条目: {p}'); fail = True; continue
+                  m = f'{cls}.m'
+                  in_src = os.path.isfile(os.path.join(src_dir, m))
+                  in_dst = os.path.isfile(os.path.join(dst_dir, m))
+                  mark = '✅' if (in_src and in_dst) else '❌'
+                  print(f'  {mark} [{ptype}] {pname} -> {cls}  源码:{in_src} 工程:{in_dst}')
+                  if not in_src:
+                      print(f'::error::{cls}.m 不在插件源码目录，manifest 声明的类无法编译'); fail = True
+                  elif not in_dst:
+                      print(f'::error::{cls}.m 未拷入工程目录，不会进入 Xcode 编译源'); fail = True
+          sys.exit(1 if fail else 0)
+          PY
+
+          echo ""
+          echo "========== 4. 兼容层头文件必须在场 =========="
+          # DMMonitorPluginCompat.h 负责 include DCUniDefine.h 以取得
+          # UNI_EXPORT_METHOD 宏。缺它则整个插件的方法注册全部失效。
+          if [ ! -f "$DST_DIR/DMMonitorPluginCompat.h" ]; then
+            echo "::error::缺少 DMMonitorPluginCompat.h，UNI_EXPORT_METHOD 宏无法解析"
+            exit 1
+          fi
+          echo "✅ DMMonitorPluginCompat.h 就位"
+          echo "✅ 插件来源与 manifest 一致性校验全部通过"
+
+      - name: Write PrivacyInfo.xcprivacy
+        run: |
+          cat > sdk-root/SDK/PrivacyInfo.xcprivacy <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>NSPrivacyTracking</key><false/>
+            <key>NSPrivacyTrackingDomains</key><array/>
+            <key>NSPrivacyCollectedDataTypes</key><array/>
+            <key>NSPrivacyAccessedAPITypes</key>
+            <array>
+              <dict>
+                <key>NSPrivacyAccessedAPIType</key><string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+                <key>NSPrivacyAccessedAPITypeReasons</key><array><string>C617.1</string></array>
+              </dict>
+              <dict>
+                <key>NSPrivacyAccessedAPIType</key><string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+                <key>NSPrivacyAccessedAPITypeReasons</key><array><string>CA92.1</string></array>
+              </dict>
+              <dict>
+                <key>NSPrivacyAccessedAPIType</key><string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+                <key>NSPrivacyAccessedAPITypeReasons</key><array><string>E174.1</string></array>
+              </dict>
+            </array>
+          </dict>
+          </plist>
+          EOF
+          echo "PrivacyInfo.xcprivacy 已写入"
+          rm -f sdk-root/HBuilder-Hello/HBuilder-Hello/PrivacyInfo.xcprivacy 2>/dev/null || true
+
+      # -----------------------------------------------------------------------
+      # 阶段 3：解析渠道身份（必须先于插件集成，Ruby 脚本需要 IOS_BUNDLE_ID）
+      # -----------------------------------------------------------------------
+      - name: Compute iOS channel identity
+        env:
+          CHANNEL_APPKEY: ${{ secrets[format('DLOUD_APPKEY_{0}', inputs.oem_channel)] }}
+        run: |
+          set -eu
+          CHANNEL="${{ inputs.oem_channel }}"
+          eval "$(bash repo/scripts/ci/read-ios-channel.sh "$PWD/repo" "$CHANNEL")"
+          [ -n "$CHANNEL_IOS_BUNDLE_ID" ] || { echo "::error::渠道 bundleId 为空"; exit 1; }
+          [ -n "$CHANNEL_IOS_APPID" ] || { echo "::error::渠道 appid 为空"; exit 1; }
+          APPKEY="${CHANNEL_APPKEY:-}"
+          [ -n "$APPKEY" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 DCloud appkey Secret (DLOUD_APPKEY_${CHANNEL})"; exit 1; }
+          # 先注册掩码，再写入 GITHUB_ENV，确保后续任何步骤的日志输出都不会泄露明文
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_BUNDLE_ID"
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_APPID"
+          printf "::add-mask::%s\n" "$APPKEY"
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_DISPLAY_NAME"
+          echo "IOS_BUNDLE_ID=$CHANNEL_IOS_BUNDLE_ID" >> "$GITHUB_ENV"
+          echo "IOS_DISPLAY_NAME=$CHANNEL_IOS_DISPLAY_NAME" >> "$GITHUB_ENV"
+          echo "DLOUD_APPID=$CHANNEL_IOS_APPID" >> "$GITHUB_ENV"
+          echo "IOS_PROFILE_SPECIFIER=$CHANNEL_IOS_PROFILE_SPECIFIER" >> "$GITHUB_ENV"
+          echo "IOS_DCLOUD_APPKEY=$APPKEY" >> "$GITHUB_ENV"
+          echo "channel identity loaded: $CHANNEL"
+
+      # -----------------------------------------------------------------------
+      # 阶段 4：集成原生插件（旧 build-ios.yml 完全缺失的环节）
+      # -----------------------------------------------------------------------
+      - name: Verify DCloud plugin headers (UNI_EXPORT_METHOD 权威判定)
+        run: |
+          # UNI_EXPORT_METHOD / UNI_EXPORT_METHOD_SYNC 定义在 DCUniDefine.h。
+          # 若该头缺失或未定义宏，DMMonitorPluginCompat.h 会退化为空宏桩：
+          # 插件照常编译、类与 selector 都在二进制里，但方法不会注册到 uni 运行时，
+          # JS 端 requireNativePlugin 拿到空对象 → 线上报"未集成监控播放原生插件"。
+          # 这类坏包 strings/nm 都查不出来，必须在集成前拦住。
+          set -u
+          cd sdk-root
+          echo "=== 搜索 DCUniDefine.h（UNI_EXPORT_METHOD 宏定义所在）==="
+          find . -name "DCUniDefine.h" -type f -not -path '*/.git/*' 2>/dev/null || true
+          echo "=== 搜索 DCUniModule.h（插件基类）==="
+          find . -name "DCUniModule.h" -type f -not -path '*/.git/*' 2>/dev/null || true
+
+          DEF_FILE=$(find . -name "DCUniDefine.h" -type f -not -path '*/.git/*' 2>/dev/null | head -1)
+          if [ -z "$DEF_FILE" ]; then
+            echo "::error::未找到 DCUniDefine.h，UNI_EXPORT_METHOD 宏必然失效"
+            echo "::error::瘦身 SDK 可能不完整，请检查 Release ${{ inputs.sdk_release_tag }} 的资产内容"
+            exit 1
+          fi
+          echo "DCUniDefine.h: $DEF_FILE"
+          if ! grep -q "UNI_EXPORT_METHOD" "$DEF_FILE" 2>/dev/null; then
+            echo "::error::DCUniDefine.h 存在但未定义 UNI_EXPORT_METHOD，宏将退化为空，插件方法不注册"
+            exit 1
+          fi
+          echo "✅ DCUniDefine.h 已定义 UNI_EXPORT_METHOD，插件方法可正常注册"
+          grep -n "UNI_EXPORT_METHOD\|UNI_EXPORT_METHOD_SYNC" "$DEF_FILE" 2>/dev/null | head -8
+
+          DCU_FILE=$(find . -name "DCUniModule.h" -type f -not -path '*/.git/*' 2>/dev/null | head -1)
+          if [ -z "$DCU_FILE" ]; then
+            echo "::error::未找到 DCUniModule.h，插件基类无法解析"
+            exit 1
+          fi
+          echo "✅ DCUniModule.h: $DCU_FILE"
+
+      - name: Integrate plugins (Ruby xcodeproj)
+        run: |
+          cd sdk-root
+          ruby "$GITHUB_WORKSPACE/scripts/ci/integrate-plugins.rb"
+          echo "=== 验证 HEADER_SEARCH_PATHS ==="
+          PROJ="HBuilder-Hello/HBuilder-Hello.xcodeproj/project.pbxproj"
+          if [ ! -f "$PROJ" ]; then
+            echo "::error::project.pbxproj 不存在: $PROJ"
+            exit 1
+          fi
+          grep -c "DCUniModule" "$PROJ" || echo "(未找到 DCUniModule 引用)"
+
+      - name: Inject feature.plist (native plugin registration)
+        run: |
+          cd sdk-root
+          python3 "$GITHUB_WORKSPACE/scripts/ci/inject-ios-feature-plist.py" .
+          echo "=== feature.plist 注册条目验证 ==="
+          PLIST=$(find . -name "feature.plist" -path "*PandoraApi*" -not -path "*/Examples/*" -not -path "*/Samples/*" 2>/dev/null | head -1)
+          if [ -z "$PLIST" ]; then
+            echo "::error::inject 后仍未找到 PandoraApi.bundle/feature.plist"
+            echo "::error::缺它 requireNativePlugin 直接返回 null，插件永远不可用"
+            exit 1
+          fi
+          echo "feature.plist: $PLIST"
+          python3 -c "
+          import plistlib, sys
+          pl = plistlib.load(open(sys.argv[1],'rb'))
+          for name in ['DoorMaster-Monitor-Player','doorMasterMonitorPlayerView']:
+              print(f'  {name} -> {pl.get(name)}')
+          " "$PLIST" 2>/dev/null || echo "(解析失败，但文件存在)"
+
+      - name: Sanity check (scheme 与工程可解析)
+        run: |
+          cd sdk-root/HBuilder-Hello
+          echo "=== xcodebuild -list（确认 scheme 名）==="
+          xcodebuild -list -project HBuilder-Hello.xcodeproj
+
+      - name: Verify plugin integration
+        run: |
+          set -u
+          echo "=== 验证原生插件集成 ==="
+          PROJ="sdk-root/HBuilder-Hello/HBuilder-Hello.xcodeproj/project.pbxproj"
+          DMM_COUNT=$(grep -c "DMMonitor.*\.m" "$PROJ" 2>/dev/null || echo "0")
+          if [ "$DMM_COUNT" -eq 0 ]; then
+            echo "::error::DMMonitor 源文件未加入 Xcode 编译源"
+            exit 1
+          fi
+          echo "✅ DMMonitor 源文件 ($DMM_COUNT 处引用) 已加入编译"
+          if ! grep -q "HEADER_SEARCH_PATHS" "$PROJ" 2>/dev/null; then
+            echo "::error::project.pbxproj 中未找到 HEADER_SEARCH_PATHS 配置"
+            exit 1
+          fi
+          echo "--- HEADER_SEARCH_PATHS ---"
+          grep "HEADER_SEARCH_PATHS" "$PROJ" | head -5
+          if ! grep -q "SDK/inc/DCUni" "$PROJ" 2>/dev/null; then
+            echo "::error::HEADER_SEARCH_PATHS 未命中 SDK/inc/DCUni，<DCUni/DCUniDefine.h> 无法解析"
+            echo "::error::UNI_EXPORT_METHOD 将回退为空宏桩，方法不会注册"
+            exit 1
+          fi
+          echo "✅ HEADER_SEARCH_PATHS 命中 SDK/inc/DCUni"
+          if grep -q "MobileVLCKit" "$PROJ" 2>/dev/null; then
+            echo "✅ MobileVLCKit 已 Link + Embed"
+          else
+            echo "::warning::MobileVLCKit 未在工程中找到，H265/RTMP 高级流将不可用"
+          fi
+          PLUGIN_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello/PlugIns/DoorMasterMonitorPlayer"
+          PLUGIN_FILES=$(ls "$PLUGIN_DIR"/*.m 2>/dev/null | wc -l || echo "0")
+          if [ "$PLUGIN_FILES" -eq 0 ]; then
+            echo "::error::PlugIns/DoorMasterMonitorPlayer 目录下无 .m 源文件"
+            exit 1
+          fi
+          echo "✅ 插件目录有 $PLUGIN_FILES 个 .m 源文件"
+
+          echo "--- 验证 feature.plist 插件注册 ---"
+          FEATURE_PLIST=$(find sdk-root -name "feature.plist" -path "*PandoraApi*" -not -path "*/Examples/*" -not -path "*/Samples/*" 2>/dev/null | head -1)
+          if [ -z "$FEATURE_PLIST" ]; then
+            echo "::error::未找到 PandoraApi.bundle/feature.plist，原生插件无法注册到 uni 运行时"
+            exit 1
+          fi
+          echo "feature.plist: $FEATURE_PLIST"
+          python3 -c "
+          import plistlib, sys
+          pl = plistlib.load(open(sys.argv[1],'rb'))
+          ok = True
+          for name in ['DoorMaster-Monitor-Player','doorMasterMonitorPlayerView']:
+              entry = pl.get(name)
+              if not entry:
+                  print(f'::error::feature.plist 缺少 {name} 注册条目')
+                  ok = False
+              else:
+                  print(f'  ✅ {name} -> {entry}')
+          sys.exit(0 if ok else 1)
+          " "$FEATURE_PLIST"
+
+      # -----------------------------------------------------------------------
+      # 阶段 5：写入渠道身份与业务资源
+      # -----------------------------------------------------------------------
+      - name: Configure Info.plist and control.xml
+        run: |
+          set -eu
+          PLIST="sdk-root/HBuilder-Hello/HBuilder-Hello/HBuilder-Hello-Info.plist"
+          [ -f "$PLIST" ] || { echo "::error::未找到 Info.plist: $PLIST"; exit 1; }
+          python3 repo/scripts/ci/inject-ios-config.py "$PLIST" \
+            --appkey "${IOS_DCLOUD_APPKEY}" \
+            --display-name "${IOS_DISPLAY_NAME}" \
+            --bundle-id "${IOS_BUNDLE_ID}" \
+            --version-name "${{ inputs.version_name }}" \
+            --version-code "${{ inputs.version_code }}"
+          python3 "$GITHUB_WORKSPACE/scripts/ci/clean-privacy-strings.py" "$PLIST"
+          echo "=== Info.plist 配置完成 ==="
+
+          PROJECT_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello"
+          while IFS= read -r f; do
+            printf '"CFBundleDisplayName" = "%s";\n"CFBundleName" = "Merchant";\n' "${IOS_DISPLAY_NAME}" > "$f"
+            echo "已覆写: InfoPlist.strings"
+          done < <(find "$PROJECT_DIR" -name "InfoPlist.strings" -type f)
+
+          CTRL="sdk-root/HBuilder-Hello/HBuilder-Hello/control.xml"
+          [ -f "$CTRL" ] || { echo "::error::未找到 control.xml: $CTRL"; exit 1; }
+          sed -i '' "s/__UNI__33C5XXX/$DLOUD_APPID/g" "$CTRL"
+          sed -i '' 's/debug="true"/debug="false"/g' "$CTRL"
+          if ! grep -q "$DLOUD_APPID" "$CTRL"; then
+            echo "::error::control.xml 中未找到渠道 appid，占位符替换可能失败"
+            exit 1
+          fi
+          echo "control.xml 已配置"
+
+          APPS="sdk-root/HBuilder-Hello/HBuilder-Hello/Pandora/apps"
+          rm -rf "$APPS"/*
+          mkdir -p "$APPS/${DLOUD_APPID}"
+          echo "=== Pandora/apps 已重置 ==="
+          PANDORA_API_APPS="sdk-root/HBuilder-Hello/HBuilder-Hello/PandoraApi.bundle/apps"
+          if [ -d "$PANDORA_API_APPS" ]; then
+            rm -rf "$PANDORA_API_APPS"/*
+            echo "=== PandoraApi.bundle/apps 已清理 ==="
+          fi
+
+      - name: Sync Uni-app www into iOS project
+        run: |
+          set -eu
+          WWW_DEST="sdk-root/${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}/Pandora/apps/${DLOUD_APPID}/www"
+          mkdir -p "$(dirname "$WWW_DEST")"
+          rm -rf "$WWW_DEST"
+          cp -r repo/dist/build/app "$WWW_DEST"
+          APPS_DIR="sdk-root/${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}/Pandora/apps"
+          for d in "$APPS_DIR"/*/; do
+            dir_name=$(basename "$d")
+            [ "$dir_name" = "$DLOUD_APPID" ] || { rm -rf "$d"; echo "已清理 SDK Demo app"; }
+          done
+          echo "Synced www into iOS project"
+
+      - name: Inject App Icon
+        run: |
+          set -eu
+          OEM_DIR="repo/oem_config/${{ inputs.oem_channel }}"
+          ICON_REL="$(python3 -c "
+          import json, sys
+          try:
+              cfg = json.load(open(sys.argv[1] + '/oem.json', encoding='utf-8'))
+              print((cfg.get('ios') or {}).get('appIcon') or 'icons/app.png')
+          except Exception:
+              print('icons/app.png')
+          " "$OEM_DIR")"
+          ICON_SRC="$OEM_DIR/$ICON_REL"
+          [ -f "$ICON_SRC" ] || { echo "::error::未找到 App 图标"; exit 1; }
+          bash repo/scripts/ci/sync-ios-appicons.sh "$ICON_SRC" "$GITHUB_WORKSPACE/sdk-root/HBuilder-Hello"
+          echo "✅ App 图标注入完成"
+
+      - name: Inject Launch Screen
+        run: |
+          set -u
+          OEM_DIR="repo/oem_config/${{ inputs.oem_channel }}"
+          LAUNCH_SCREEN_SRC="$OEM_DIR/launchscreen/launchscreen.png"
+          if [ ! -f "$LAUNCH_SCREEN_SRC" ]; then
+            echo "::warning::未找到启动页资源，使用默认启动页"
+            exit 0
+          fi
+          APP_SRC="$GITHUB_WORKSPACE/sdk-root/HBuilder-Hello/HBuilder-Hello"
+          ASSET_DIR="$APP_SRC/Assets.xcassets"
+          LAUNCH_SCREEN_SET="$ASSET_DIR/LaunchScreen.imageset"
+          mkdir -p "$LAUNCH_SCREEN_SET"
+          cp "$LAUNCH_SCREEN_SRC" "$LAUNCH_SCREEN_SET/launchscreen.png"
+          cat > "$LAUNCH_SCREEN_SET/Contents.json" <<'JSON'
+          {
+            "images" : [
+              { "filename" : "launchscreen.png", "idiom" : "universal", "scale" : "1x" }
+            ],
+            "info" : { "author" : "xcode", "version" : 1 }
+          }
+          JSON
+          if [ ! -f "$ASSET_DIR/Contents.json" ]; then
+            echo '{ "info" : { "author" : "xcode", "version" : 1 } }' > "$ASSET_DIR/Contents.json"
+          fi
+          INFO_PLIST="$APP_SRC/HBuilder-Hello-Info.plist"
+          if [ -f "$INFO_PLIST" ]; then
+            /usr/libexec/PlistBuddy -c "Delete :UILaunchStoryboardName" "$INFO_PLIST" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :UILaunchStoryboardName string LaunchScreen" "$INFO_PLIST"
+            echo "✅ Launch Screen 配置已注入"
+          else
+            echo "::warning::Info.plist 不存在"
+          fi
+
+      - name: Strip VCS metadata and shrink tree
+        run: |
+          find sdk-root/SDK -name '.git' -type d -exec rm -rf {} + 2>/dev/null || true
+          find sdk-root/HBuilder-Hello -name '.git' -type d -exec rm -rf {} + 2>/dev/null || true
+          rm -rf sdk-root/SDK/Doc sdk-root/SDK/Examples sdk-root/SDK/Samples 2>/dev/null || true
+          echo "工程树已精简: $(du -sh sdk-root | cut -f1)"
+
+      # -----------------------------------------------------------------------
+      # 阶段 6：签名
+      # -----------------------------------------------------------------------
+      - name: Install iOS signing (keychain + p12 + app-store profile)
+        env:
+          IOS_P12_BASE64: ${{ secrets[format('IOS_P12_BASE64_{0}', inputs.oem_channel)] }}
+          IOS_P12_PASSWORD: ${{ secrets[format('IOS_P12_PASSWORD_{0}', inputs.oem_channel)] }}
+          IOS_MOBILEPROVISION_BASE64: ${{ secrets[format('IOS_MOBILEPROVISION_BASE64_{0}', inputs.oem_channel)] }}
+          IOS_TEAM_ID: ${{ secrets[format('IOS_TEAM_ID_{0}', inputs.oem_channel)] }}
+        run: |
+          set -eu
+          CHANNEL="${{ inputs.oem_channel }}"
+          [ -n "$IOS_P12_BASE64" ] || { echo "::error::未配置渠道 ${CHANNEL} 的签名证书 Secret (IOS_P12_BASE64_${CHANNEL})"; exit 1; }
+          [ -n "$IOS_P12_PASSWORD" ] || { echo "::error::未配置渠道 ${CHANNEL} 的证书密码 Secret (IOS_P12_PASSWORD_${CHANNEL})"; exit 1; }
+          [ -n "$IOS_MOBILEPROVISION_BASE64" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 App Store 描述文件 Secret (IOS_MOBILEPROVISION_BASE64_${CHANNEL})"; exit 1; }
+          [ -n "$IOS_TEAM_ID" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 Team ID Secret (IOS_TEAM_ID_${CHANNEL})"; exit 1; }
+          # 掩码证书密码与 Team ID，避免安装脚本回显时泄露到公开日志
+          printf "::add-mask::%s\n" "$IOS_P12_PASSWORD"
+          printf "::add-mask::%s\n" "$IOS_TEAM_ID"
+          export IOS_P12_BASE64=$(printf '%s' "$IOS_P12_BASE64" | tr -d '[:space:]')
+          export IOS_P12_PASSWORD=$(printf '%s' "$IOS_P12_PASSWORD" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          export IOS_MOBILEPROVISION_BASE64=$(printf '%s' "$IOS_MOBILEPROVISION_BASE64" | tr -d '[:space:]')
+          bash repo/scripts/ci/install-ios-signing.sh
+        shell: bash
+
+      - name: Install Ad Hoc provisioning profile
+        if: ${{ inputs.build_adhoc == true }}
+        env:
+          IOS_ADHOC_PROVISION_BASE64: ${{ secrets[format('IOS_ADHOC_PROVISION_BASE64_{0}', inputs.oem_channel)] }}
+        run: |
+          set -eu
+          if [ -z "$IOS_ADHOC_PROVISION_BASE64" ]; then
+            echo "::error::build_adhoc=true 但未配置 Secret IOS_ADHOC_PROVISION_BASE64_${{ inputs.oem_channel }}"
+            exit 1
+          fi
+          PROV_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROV_DIR"
+          PROV_FILE="$PROV_DIR/adhoc.mobileprovision"
+          printf '%s' "$IOS_ADHOC_PROVISION_BASE64" | tr -d '[:space:]' | base64 --decode > "$PROV_FILE"
+          PLIST="$(/usr/bin/security cms -D -i "$PROV_FILE" 2>/dev/null || true)"
+          ADHOC_UUID="$(printf '%s' "$PLIST" | /usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin 2>/dev/null || true)"
+          if [ -n "$ADHOC_UUID" ]; then
+            mv "$PROV_FILE" "$PROV_DIR/$ADHOC_UUID.mobileprovision"
+            echo "PROFILE_UUID_ADHOC=$ADHOC_UUID" >> "$GITHUB_ENV"
+            echo "Ad Hoc profile installed"
+          else
+            echo "::error::未能提取 Ad Hoc Profile UUID"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Generate ExportOptions.plist
+        env:
+          IOS_TEAM_ID: ${{ secrets[format('IOS_TEAM_ID_{0}', inputs.oem_channel)] }}
+        run: |
+          set -eu
+          gen_opts() {
+            local method="$1" profile="$2" outfile="$3"
+            cat > "$outfile" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>${method}</string>
+            <key>teamID</key><string>${IOS_TEAM_ID}</string>
+            <key>uploadSymbols</key><true/>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${IOS_BUNDLE_ID}</key>
+              <string>${profile}</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+          }
+          gen_opts "app-store" "${PROFILE_UUID}" "ExportOptions-app-store.plist"
+          if [ -n "${PROFILE_UUID_ADHOC:-}" ]; then
+            gen_opts "ad-hoc" "${PROFILE_UUID_ADHOC}" "ExportOptions-ad-hoc.plist"
+          fi
+          echo "ExportOptions.plist generated"
+
+      - name: Select Xcode
+        run: |
+          set -eu
+          echo "=== 已安装的 Xcode ==="
+          ls -la /Applications | grep -i xcode || true
+          XCODE_APP=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$XCODE_APP" ] || { echo "::error::未找到 Xcode"; exit 1; }
+          echo "选择: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP"
+          echo "DEVELOPER_DIR=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
+          if [ -L /Applications/Xcode.app ]; then
+            sudo rm -f /Applications/Xcode.app
+          fi
+          xcodebuild -version
+
+      # -----------------------------------------------------------------------
+      # 阶段 7：Archive + Export
+      # 编译输出落盘为日志，供后续「兼容桩告警」检测使用（模式 B 唯一可靠判据）
+      # -----------------------------------------------------------------------
+      - name: Build & Export IPAs
+        env:
+          IOS_TEAM_ID: ${{ secrets[format('IOS_TEAM_ID_{0}', inputs.oem_channel)] }}
+        run: |
+          set -eo pipefail
+          METHODS="app-store"
+          if [ "${{ inputs.build_adhoc }}" = "true" ] && [ -n "${PROFILE_UUID_ADHOC:-}" ]; then
+            METHODS="app-store ad-hoc"
+          fi
+          echo "=== 可用 scheme ==="
+          (cd sdk-root && xcodebuild -list -project "${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}.xcodeproj" || true)
+          for METHOD in $METHODS; do
+            if [ "$METHOD" = "app-store" ]; then
+              PROFILE="${PROFILE_UUID}"
+              OPTS="ExportOptions-app-store.plist"
+              SUFFIX="appstore"
+            else
+              PROFILE="${PROFILE_UUID_ADHOC}"
+              OPTS="ExportOptions-ad-hoc.plist"
+              SUFFIX="adhoc"
+            fi
+            echo "========== Archive ($METHOD) =========="
+            (cd sdk-root && xcodebuild archive \
+              -project "${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}.xcodeproj" \
+              -scheme "${IOS_SCHEME}" \
+              -configuration Release \
+              -archivePath "../${IOS_PROJECT_NAME}-${METHOD}.xcarchive" \
+              -destination "generic/platform=iOS" \
+              CODE_SIGN_STYLE="Manual" \
+              CODE_SIGN_IDENTITY="Apple Distribution" \
+              DEVELOPMENT_TEAM="${IOS_TEAM_ID}" \
+              PROVISIONING_PROFILE="${PROFILE}" \
+              PROVISIONING_PROFILE_SPECIFIER="${IOS_PROFILE_SPECIFIER}" \
+              ASSETCATALOG_COMPILER_APPICON_NAME="AppIcon" 2>&1 | tee "../xcodebuild-archive-${METHOD}.log")
+            echo "========== Export ($METHOD) =========="
+            mkdir -p "ipa-export-${METHOD}"
+            xcodebuild -exportArchive \
+              -archivePath "${IOS_PROJECT_NAME}-${METHOD}.xcarchive" \
+              -exportOptionsPlist "${OPTS}" \
+              -exportPath "ipa-export-${METHOD}"
+            echo "========== Rename ($METHOD) =========="
+            (cd "ipa-export-${METHOD}" && \
+              IPA="$(ls *.ipa | head -1)" && \
+              mv "$IPA" "../${{ inputs.oem_channel }}-${{ inputs.version_name }}(${{ inputs.version_code }})-${SUFFIX}.ipa")
+            echo "✅ $METHOD IPA 已产出"
+          done
+          echo "=== 所有 IPA ==="
+          ls -la ${{ inputs.oem_channel }}-*.ipa 2>/dev/null || echo "无 IPA 产出"
+
+      # -----------------------------------------------------------------------
+      # 阶段 8：深度校验（必须通过才允许上传 ASC）
+      # -----------------------------------------------------------------------
+      - name: Deep verify IPA plugin integration
+        run: |
+          set -u
+          IPA_FILE=$(ls ${{ inputs.oem_channel }}-*appstore.ipa 2>/dev/null | head -1)
+          if [ -z "$IPA_FILE" ]; then
+            IPA_FILE=$(ls ${{ inputs.oem_channel }}-*.ipa 2>/dev/null | head -1)
+          fi
+          if [ -z "$IPA_FILE" ]; then
+            echo "::error::未找到任何 IPA 产物，无法校验"
+            exit 1
+          fi
+          echo "=== 深度验证 IPA: $IPA_FILE ==="
+          rm -rf /tmp/ipa-verify
+          mkdir -p /tmp/ipa-verify
+          unzip -q "$IPA_FILE" -d /tmp/ipa-verify
+          APP_DIR=$(find /tmp/ipa-verify/Payload -maxdepth 1 -name "*.app" -type d | head -1)
+          if [ -z "$APP_DIR" ]; then
+            echo "::error::IPA 内未找到 .app 目录"
+            exit 1
+          fi
+          BIN="$APP_DIR/$(basename "$APP_DIR" .app)"
+          echo "APP_DIR: $APP_DIR"
+          fail=0
+
+          echo ""
+          echo "========== 1. 编译期兼容桩告警（模式 B 权威判据）=========="
+          # DMMonitorPluginCompat.h 在 UNI_EXPORT_METHOD 未定义时会 #warning。
+          # 此时插件能编译通过、类与 selector 都在二进制里，但方法不会注册到 uni
+          # 运行时，JS 端 requireNativePlugin 拿到空对象 → 线上报"未集成插件"。
+          # strings / nm / otool 都无法区分这种情况，只有编译告警能抓到。
+          COMPAT_WARN='UNI_EXPORT_METHOD not defined after including DCUniDefine.h'
+          LOG_COUNT=0
+          for LOG in xcodebuild-archive-*.log; do
+            [ -f "$LOG" ] || continue
+            LOG_COUNT=$((LOG_COUNT + 1))
+            if grep -qF "$COMPAT_WARN" "$LOG"; then
+              echo "::error::检测到 DMMonitorPluginCompat 兼容桩告警（$LOG）"
+              echo "::error::UNI_EXPORT_METHOD 退化为空宏，插件方法未注册，IPA 必然报'未集成插件'"
+              echo "::error::根因通常是 HEADER_SEARCH_PATHS 未命中 DCUniDefine.h"
+              grep -nF "$COMPAT_WARN" "$LOG" | head -5
+              fail=1
+            fi
+          done
+          if [ "$LOG_COUNT" -eq 0 ]; then
+            echo "::error::未找到 xcodebuild archive 日志，无法执行兼容桩检测"
+            echo "::error::缺少该检测则模式 B 坏包会静默通过，拒绝放行"
+            fail=1
+          elif [ "$fail" -eq 0 ]; then
+            echo "✅ 未出现 UNI_EXPORT_METHOD 兼容桩告警（$LOG_COUNT 份日志，宏已正常展开）"
+          fi
+
+          echo ""
+          echo "========== 2. 插件类符号（比 strings 计数精确）=========="
+          for CLS in DMMonitorPlayerModule DMMonitorPlayerView; do
+            SYM=$(nm -gU "$BIN" 2>/dev/null | grep -c "_OBJC_CLASS_\$_${CLS}" || true)
+            [ -n "$SYM" ] || SYM=0
+            if [ "$SYM" -gt 0 ]; then
+              echo "✅ ${CLS} 类符号存在（$SYM 处）"
+              continue
+            fi
+            META=$(otool -ov "$BIN" 2>/dev/null | grep -c "$CLS" || true)
+            [ -n "$META" ] || META=0
+            if [ "$META" -gt 0 ]; then
+              echo "✅ ${CLS} 存在于 ObjC 元数据（$META 处，nm 符号已裁剪）"
+            else
+              echo "::error::二进制中未找到 ${CLS}（nm 符号与 ObjC 元数据均无）"
+              echo "::error::该类未编译进 IPA，监控插件不可用"
+              fail=1
+            fi
+          done
+
+          echo ""
+          echo "========== 3. SDK 插件基类链接 =========="
+          DCU=$(strings "$BIN" 2>/dev/null | grep -c 'DCUniModule' || true)
+          [ -n "$DCU" ] || DCU=0
+          if [ "$DCU" -eq 0 ]; then
+            echo "::error::二进制中未找到 DCUniModule，SDK 原生插件基类未链接"
+            fail=1
+          else
+            echo "✅ DCUniModule 符号: $DCU 处"
+          fi
+
+          echo ""
+          echo "========== 4. feature.plist 注册表（模式 A 判据）=========="
+          FEATURE_PLIST=$(find "$APP_DIR" -name "feature.plist" -path "*PandoraApi*" 2>/dev/null | head -1)
+          if [ -z "$FEATURE_PLIST" ]; then
+            echo "::error::IPA 内未找到 PandoraApi.bundle/feature.plist"
+            echo "::error::requireNativePlugin 将直接返回 null"
+            fail=1
+          else
+            echo "feature.plist: $FEATURE_PLIST"
+            python3 -c "
+          import plistlib, sys
+          pl = plistlib.load(open(sys.argv[1],'rb'))
+          ok = True
+          for name in ['DoorMaster-Monitor-Player','doorMasterMonitorPlayerView']:
+              entry = pl.get(name)
+              if not entry:
+                  print(f'::error::feature.plist 缺少 {name} 注册条目')
+                  ok = False
+              else:
+                  print(f'  ✅ {name} -> {entry}')
+          sys.exit(0 if ok else 1)
+          " "$FEATURE_PLIST" || fail=1
+          fi
+
+          echo ""
+          echo "========== 5. www 资源与 appid 一致性 =========="
+          APPS_DIR="$APP_DIR/Pandora/apps"
+          if [ ! -d "$APPS_DIR" ]; then
+            echo "::error::IPA 内无 Pandora/apps 目录"
+            fail=1
+          else
+            APP_DIRS=$(find "$APPS_DIR" -maxdepth 1 -mindepth 1 -type d)
+            APP_COUNT=$(printf '%s\n' "$APP_DIRS" | grep -c . || true)
+            echo "Pandora/apps 子目录数: $APP_COUNT"
+            if [ "$APP_COUNT" -ne 1 ]; then
+              echo "::error::Pandora/apps 应只含 1 个渠道 appid 目录，实际 $APP_COUNT 个"
+              printf '%s\n' "$APP_DIRS"
+              fail=1
+            elif ! printf '%s' "$APP_DIRS" | grep -q "$DLOUD_APPID"; then
+              echo "::error::Pandora/apps 目录名与渠道 appid 不一致，control.xml 会加载失败"
+              fail=1
+            else
+              echo "✅ www 目录与渠道 appid 一致"
+            fi
+          fi
+
+          echo ""
+          echo "========== 6. MobileVLCKit framework =========="
+          if find "$APP_DIR/Frameworks" -maxdepth 1 -iname "*VLC*" 2>/dev/null | grep -q .; then
+            echo "✅ MobileVLCKit.framework 已嵌入 IPA（H265/RTMP 高级流可用）"
+          else
+            echo "::warning::MobileVLCKit.framework 未嵌入，advancedStreamReady 将为 false"
+            echo "::warning::基础 hls/mp4/fmp4 播放仍可用，不影响插件注册"
+          fi
+
+          echo ""
+          echo "========== 7. 参考信息（不作判定）=========="
+          # selector 字符串只要方法被实现就会出现，与 UNI_EXPORT_METHOD 是否展开无关，
+          # 因此不能用来判断插件是否可用；权威判据见第 1 节。
+          PM=$(strings "$BIN" 2>/dev/null | grep -cE 'playFullscreen|playInline|getCapabilities' || true)
+          [ -n "$PM" ] || PM=0
+          echo "ℹ️ selector 字符串: $PM 处（方法已实现即出现，不能证明已注册）"
+
+          rm -rf /tmp/ipa-verify
+
+          echo ""
+          echo "========== 最终判定 =========="
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::IPA 插件集成校验未通过，已阻止上传 App Store Connect"
+            exit 1
+          fi
+          echo "✅ 深度校验全部通过，插件已正确集成并注册"
+
+      # -----------------------------------------------------------------------
+      # 阶段 9：分发
+      # -----------------------------------------------------------------------
+      - name: Upload to App Store Connect
+        if: ${{ inputs.upload_to_asc == true }}
+        env:
+          ASC_API_KEY_ID: ${{ secrets[format('ASC_API_KEY_ID_{0}', inputs.oem_channel)] }}
+          ASC_ISSUER_ID: ${{ secrets[format('ASC_ISSUER_ID_{0}', inputs.oem_channel)] }}
+          ASC_API_KEY_P8: ${{ secrets[format('ASC_API_KEY_P8_{0}', inputs.oem_channel)] }}
+        run: |
+          set -eu
+          if [ -z "$ASC_API_KEY_ID" ] || [ -z "$ASC_ISSUER_ID" ] || [ -z "$ASC_API_KEY_P8" ]; then
+            echo "::error::启用了 upload_to_asc 但未配置渠道 ${{ inputs.oem_channel }} 的 ASC_API_KEY_ID / ASC_ISSUER_ID / ASC_API_KEY_P8 Secret"
+            exit 1
+          fi
+          printf "::add-mask::%s\n" "$ASC_API_KEY_ID"
+          printf "::add-mask::%s\n" "$ASC_ISSUER_ID"
+          mkdir -p ~/private_keys
+          printf '%s' "$ASC_API_KEY_P8" > ~/private_keys/AuthKey_${ASC_API_KEY_ID}.p8
+          chmod 600 ~/private_keys/AuthKey_${ASC_API_KEY_ID}.p8
+          IPA="$(ls ${{ inputs.oem_channel }}-*appstore.ipa 2>/dev/null | head -1)"
+          if [ -z "$IPA" ]; then
+            echo "::error::未找到 app-store IPA"
+            exit 1
+          fi
+          echo "上传 IPA 到 App Store Connect"
+          xcrun altool --upload-app -f "$IPA" -t ios \
+            --apiKey "$ASC_API_KEY_ID" --apiIssuer "$ASC_ISSUER_ID" \
+            --verbose 2>&1 | tail -40
+
+      - name: Upload IPA artifacts
+        if: ${{ inputs.upload_ipa_artifact == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipa-${{ inputs.oem_channel }}-${{ inputs.version_name }}
+          path: ${{ inputs.oem_channel }}-*.ipa
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload dSYM (symbols)
+        if: ${{ inputs.upload_dsym_artifact == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsym-${{ inputs.oem_channel }}-${{ inputs.version_name }}
+          path: "${{ env.IOS_PROJECT_NAME }}-app-store.xcarchive/dSYMs"
+          retention-days: 7
+          if-no-files-found: warn
+
+      # -----------------------------------------------------------------------
+      # 阶段 10：清理敏感文件
+      # GitHub 托管 runner 在 Job 结束后会销毁虚拟机，本步骤属于额外保险，
+      # 同时确保即使 Job 被 cancel 也不会把密钥留在可复用的路径上。
+      # -----------------------------------------------------------------------
+      - name: Cleanup sensitive files
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "=== 清理敏感文件 ==="
+          rm -f ~/.ssh/id_ed25519 2>/dev/null || true
+          rm -rf ~/private_keys 2>/dev/null || true
+          rm -f ./*.p12 ./*.mobileprovision 2>/dev/null || true
+          rm -f ExportOptions-app-store.plist ExportOptions-ad-hoc.plist 2>/dev/null || true
+          rm -rf "$HOME/Library/MobileDevice/Provisioning Profiles"/* 2>/dev/null || true
+          rm -rf ./*.xcarchive 2>/dev/null || true
+          rm -f xcodebuild-archive-*.log 2>/dev/null || true
+          echo "已清理: SSH 私钥 / ASC 私钥 / 证书 / 描述文件 / ExportOptions / xcarchive"
+          echo "注意: IPA 未删除（供 upload-artifact 步骤使用），runner 销毁时一并清除"
