@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""注入 DCloud iOS 离线工程的 feature.plist，注册原生插件模块/组件映射。
+"""注入 DCloud iOS 离线工程的 feature.plist 兼容注册条目。
 
-DCloud iOS SDK 通过 PandoraApi.bundle/feature.plist 把 JS 端
-requireNativePlugin 的模块名映射到原生 ObjC 类。缺了它，即使插件源码已编译
-进二进制、UNI_EXPORT_METHOD 宏已生效，运行时 requireNativePlugin 也会返回
-null（诊断表现为 plugin object: unresolved; plugin type: null; methods: none）。
-
-对应 docs/ios-preintegrated-project-setup.md 步骤 4 与
-docs/ios-appstore-submission.md 5.3 的手工 feature.plist 注册步骤。
+注意：uni-app 原生插件（JS 端 uni.requireNativePlugin）在 iOS 上的实际
+注册表是 Info.plist 的 dcloud_uniplugins，由 inject-ios-uniplugins.py 维护；
+feature.plist 主要用于 5+/HTML5+ 内置模块映射。这里继续写一份是为了兼容
+不同 SDK 版本/文档要求，并保留 SDK 自带的其他条目不动。
 
 用法: python3 inject-ios-feature-plist.py <sdk-root 或工程根目录>
 
@@ -34,8 +31,10 @@ PLUGINS = {
 }
 
 # feature.plist 在不同 SDK 版本/解压层级下的候选相对路径。
-# 优先匹配 PandoraApi.bundle 内的（DCloud 运行时实际读取的位置）。
+# SDK 4.x 工程实际 Copy Bundle Resources 的是 SDK/Bundles/PandoraApi.bundle，
+# 因此把它放在最前面，避免改到工程目录下未参与打包的同名副本。
 CANDIDATE_REL = [
+    'SDK/Bundles/PandoraApi.bundle/feature.plist',
     'HBuilder-Hello/HBuilder-Hello/PandoraApi.bundle/feature.plist',
     'HBuilder-Hello/PandoraApi.bundle/feature.plist',
     'PandoraApi.bundle/feature.plist',
