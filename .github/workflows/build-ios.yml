@@ -513,11 +513,37 @@ jobs:
 
           echo ""
           echo "========== 3. ObjC 方法签名 (class-list) =========="
-          echo "--- otool -ov (ObjC metadata) ---"
-          otool -ov "$BIN" 2>/dev/null | grep -A2 "DMMonitor" | head -40 || echo "(otool 无输出或 binary stripped)"
+          echo "--- otool -ov DMMonitorPlayerModule（关键：模块类必须在 ObjC 元数据中）---"
+          otool -ov "$BIN" 2>/dev/null | grep -A5 "DMMonitorPlayerModule" | head -60 || echo "(otool 无输出或 binary stripped)"
+          DMM_OT=$(otool -ov "$BIN" 2>/dev/null | grep -c "DMMonitorPlayerModule" || true)
+          if [ -z "$DMM_OT" ]; then DMM_OT=0; fi
+          echo "otool -ov 中 DMMonitorPlayerModule 出现次数: $DMM_OT"
+          if [ "$DMM_OT" -eq 0 ]; then
+            echo "::error::DMMonitorPlayerModule 类未出现在 ObjC 元数据中 — requireNativePlugin 将返回 null"
+            echo "::error::可能原因: .m 文件未编译/链接，或 UNI_EXPORT_METHOD 宏未展开"
+          fi
+          echo ""
+          echo "--- otool -ov DMMonitorPlayerView ---"
+          otool -ov "$BIN" 2>/dev/null | grep -A3 "DMMonitorPlayerView" | head -30 || echo "(otool 无输出)"
           echo ""
           echo "--- otool -ov DCUniModule ---"
           otool -ov "$BIN" 2>/dev/null | grep -A2 "DCUniModule" | head -40 || echo "(otool 无输出)"
+
+          echo ""
+          echo "========== 3.5 wx_export_method 链接器段（DCloud 插件方法注册机制）=========="
+          echo "--- otool -s __DATA wx_export_method ---"
+          otool -s __DATA wx_export_method "$BIN" 2>/dev/null || echo "(段不存在或无法读取)"
+          echo ""
+          echo "--- 段大小 ---"
+          WX_SIZE=$(otool -s __DATA wx_export_method "$BIN" 2>/dev/null | tail -1 | wc -w || echo "0")
+          echo "wx_export_method 段数据字数: $WX_SIZE"
+          if [ "$WX_SIZE" -le 1 ]; then
+            echo "::error::wx_export_method 段为空或不存在 — UNI_EXPORT_METHOD 注册的方法不会被 DCloud 运行时发现"
+            echo "::error::requireNativePlugin 返回的对象不会有 play/playInline/playFullscreen 等方法"
+          fi
+          echo ""
+          echo "--- nm 搜索 UniModulesExportMethod / wx_export ---"
+          nm "$BIN" 2>/dev/null | grep -iE "UniModulesExportMethod|wx_export_method|UniModuleMethod" | head -20 || echo "(无匹配符号)"
 
           echo ""
           echo "========== 4. SDK 内置插件注册表 =========="
@@ -597,7 +623,7 @@ jobs:
 
           DMM_CLASS=$(strings "$BIN" 2>/dev/null | grep -c "DMMonitorPlayerModule" || true)
           if [ -z "$DMM_CLASS" ]; then DMM_CLASS=0; fi
-          echo "DMMonitorPlayerModule 类名: $DMM_CLASS 处"
+          echo "DMMonitorPlayerModule 类名(strings): $DMM_CLASS 处"
 
           DCU_SYMBOLS=$(strings "$BIN" 2>/dev/null | grep -c "DCUniModule" || true)
           if [ -z "$DCU_SYMBOLS" ]; then DCU_SYMBOLS=0; fi
@@ -606,6 +632,22 @@ jobs:
           PLAY_METHODS=$(strings "$BIN" 2>/dev/null | grep -c "playFullscreen\|playInline\|getCapabilities" || true)
           if [ -z "$PLAY_METHODS" ]; then PLAY_METHODS=0; fi
           echo "导出方法名: $PLAY_METHODS 处"
+
+          echo ""
+          echo "--- 权威判定: ObjC 元数据 + wx_export_method 段 ---"
+          if [ "$DMM_OT" -eq 0 ]; then
+            echo "::error::DMMonitorPlayerModule 类不在 ObjC 元数据中 — 运行时 requireNativePlugin 返回 null"
+            echo "::error::尽管 strings 找到了符号（可能来自 feature.plist 字符串），但类未编译进二进制"
+            exit 1
+          fi
+          echo "✅ DMMonitorPlayerModule 类在 ObjC 元数据中: $DMM_OT 处"
+
+          if [ "$WX_SIZE" -le 1 ]; then
+            echo "::error::wx_export_method 段为空 — UNI_EXPORT_METHOD 注册的方法不会被运行时发现"
+            echo "::error::requireNativePlugin 返回的对象不会有 play/playInline 等方法"
+            exit 1
+          fi
+          echo "✅ wx_export_method 段有数据 ($WX_SIZE 字)"
 
           rm -rf /tmp/ipa-verify
 
