@@ -662,73 +662,61 @@ jobs:
           # 无论是否有 OEM 启动图，都创建 storyboard 避免回退到 SDK 默认 logo
           STORYBOARD="$APP_SRC/LaunchScreen.storyboard"
           cat > "$STORYBOARD" <<'XML'
-          <?xml version="1.0" encoding="UTF-8" standalone="no"?>
-          <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="22500" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" initialViewController="01J-lp-oVM">
-            <device id="retina6_12" orientation="portrait" appearance="light"/>
-            <dependencies>
-              <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="22500"/>
-              <capability name="Safe area layout guides" minToolsVersion="9.0"/>
-              <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
-            </dependencies>
-            <scenes>
-              <scene sceneID="EHf-IW-A2E">
-                <objects>
-                  <viewController id="01J-lp-oVM" sceneMemberID="viewController">
-                    <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
-                      <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
-                      <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
-                      <subviews>
-                        <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFill" horizontalHuggingPriority="251" verticalHuggingPriority="251" image="LaunchScreen" translatesAutoresizingMaskIntoConstraints="NO" id="LS0-KB-PxP">
-                          <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
-                        </imageView>
-                      </subviews>
-                      <viewLayoutGuide key="safeArea" id="6Tk-OE-BBY"/>
-                      <color key="backgroundColor" white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
-                      <constraints>
-                        <constraint firstItem="LS0-KB-PxP" firstAttribute="top" secondItem="Ze5-6b-2t3" secondAttribute="top" id="C1"/>
-                        <constraint firstItem="LS0-KB-PxP" firstAttribute="leading" secondItem="Ze5-6b-2t3" secondAttribute="leading" id="C2"/>
-                        <constraint firstItem="LS0-KB-PxP" firstAttribute="trailing" secondItem="Ze5-6b-2t3" secondAttribute="trailing" id="C3"/>
-                        <constraint firstItem="LS0-KB-PxP" firstAttribute="bottom" secondItem="Ze5-6b-2t3" secondAttribute="bottom" id="C4"/>
-                      </constraints>
-                    </view>
-                  </viewController>
-                  <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" sceneMemberID="firstResponder"/>
-                </objects>
-                <point key="canvasLocation" x="53" y="375"/>
-              </scene>
-            </scenes>
-            <resources>
-              <image name="LaunchScreen" width="393" height="852"/>
-            </resources>
-          </document>
-          XML
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="22500" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" initialViewController="01J-lp-oVM">
+  <device id="retina6_12" orientation="portrait" appearance="light"/>
+  <dependencies>
+    <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="22500"/>
+    <capability name="Safe area layout guides" minToolsVersion="9.0"/>
+    <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
+  </dependencies>
+  <scenes>
+    <scene sceneID="EHf-IW-A2E">
+      <objects>
+        <viewController id="01J-lp-oVM" sceneMemberID="viewController">
+          <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
+            <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+            <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+            <subviews>
+              <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFill" horizontalHuggingPriority="251" verticalHuggingPriority="251" image="LaunchScreen" translatesAutoresizingMaskIntoConstraints="NO" id="LS0-KB-PxP">
+                <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+              </imageView>
+            </subviews>
+            <viewLayoutGuide key="safeArea" id="6Tk-OE-BBY"/>
+            <color key="backgroundColor" white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
+            <constraints>
+              <constraint firstItem="LS0-KB-PxP" firstAttribute="top" secondItem="Ze5-6b-2t3" secondAttribute="top" id="C1"/>
+              <constraint firstItem="LS0-KB-PxP" firstAttribute="leading" secondItem="Ze5-6b-2t3" secondAttribute="leading" id="C2"/>
+              <constraint firstItem="LS0-KB-PxP" firstAttribute="trailing" secondItem="Ze5-6b-2t3" secondAttribute="trailing" id="C3"/>
+              <constraint firstItem="LS0-KB-PxP" firstAttribute="bottom" secondItem="Ze5-6b-2t3" secondAttribute="bottom" id="C4"/>
+            </constraints>
+          </view>
+        </viewController>
+        <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" sceneMemberID="firstResponder"/>
+      </objects>
+      <point key="canvasLocation" x="53" y="375"/>
+    </scene>
+  </scenes>
+  <resources>
+    <image name="LaunchScreen" width="393" height="852"/>
+  </resources>
+</document>
+XML
           echo "LaunchScreen.storyboard 已创建"
 
           if [ ! -f "$LAUNCH_SCREEN_SRC" ]; then
             echo "::warning::未找到 OEM 启动页资源 ($LAUNCH_SCREEN_SRC)，storyboard 将使用纯白背景"
-            # 创建一个空白 imageset 占位
             mkdir -p "$LAUNCH_SCREEN_SET"
             cat > "$LAUNCH_SCREEN_SET/Contents.json" <<'JSON'
-            {
-              "images" : [
-                { "filename" : "launchscreen.png", "idiom" : "universal", "scale" : "1x" }
-              ],
-              "info" : { "author" : "xcode", "version" : 1 }
-            }
-            JSON
-            # 用 App Icon 作为占位图（至少不显示 HBuilder logo）
+{ "images" : [ { "filename" : "launchscreen.png", "idiom" : "universal", "scale" : "1x" } ], "info" : { "author" : "xcode", "version" : 1 } }
+JSON
             cp "$OEM_DIR/icons/app.png" "$LAUNCH_SCREEN_SET/launchscreen.png" 2>/dev/null || true
           else
             mkdir -p "$LAUNCH_SCREEN_SET"
             cp "$LAUNCH_SCREEN_SRC" "$LAUNCH_SCREEN_SET/launchscreen.png"
             cat > "$LAUNCH_SCREEN_SET/Contents.json" <<'JSON'
-            {
-              "images" : [
-                { "filename" : "launchscreen.png", "idiom" : "universal", "scale" : "1x" }
-              ],
-              "info" : { "author" : "xcode", "version" : 1 }
-            }
-            JSON
+{ "images" : [ { "filename" : "launchscreen.png", "idiom" : "universal", "scale" : "1x" } ], "info" : { "author" : "xcode", "version" : 1 } }
+JSON
             echo "✅ OEM 启动图已注入"
           fi
 
