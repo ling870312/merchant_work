@@ -658,67 +658,61 @@ jobs:
           APP_SRC="$GITHUB_WORKSPACE/sdk-root/HBuilder-Hello/HBuilder-Hello"
           ASSET_DIR="$APP_SRC/Assets.xcassets"
           LAUNCH_SCREEN_SET="$ASSET_DIR/LaunchScreen.imageset"
-
-          # 无论是否有 OEM 启动图，都创建 storyboard 避免回退到 SDK 默认 logo
           STORYBOARD="$APP_SRC/LaunchScreen.storyboard"
-          cat > "$STORYBOARD" <<'XML'
-<?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="22500" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" initialViewController="01J-lp-oVM">
-  <device id="retina6_12" orientation="portrait" appearance="light"/>
-  <dependencies>
-    <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="22500"/>
-    <capability name="Safe area layout guides" minToolsVersion="9.0"/>
-    <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
-  </dependencies>
-  <scenes>
-    <scene sceneID="EHf-IW-A2E">
-      <objects>
-        <viewController id="01J-lp-oVM" sceneMemberID="viewController">
-          <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
-            <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
-            <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
-            <subviews>
-              <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFill" horizontalHuggingPriority="251" verticalHuggingPriority="251" image="LaunchScreen" translatesAutoresizingMaskIntoConstraints="NO" id="LS0-KB-PxP">
-                <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
-              </imageView>
-            </subviews>
-            <viewLayoutGuide key="safeArea" id="6Tk-OE-BBY"/>
-            <color key="backgroundColor" white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
-            <constraints>
-              <constraint firstItem="LS0-KB-PxP" firstAttribute="top" secondItem="Ze5-6b-2t3" secondAttribute="top" id="C1"/>
-              <constraint firstItem="LS0-KB-PxP" firstAttribute="leading" secondItem="Ze5-6b-2t3" secondAttribute="leading" id="C2"/>
-              <constraint firstItem="LS0-KB-PxP" firstAttribute="trailing" secondItem="Ze5-6b-2t3" secondAttribute="trailing" id="C3"/>
-              <constraint firstItem="LS0-KB-PxP" firstAttribute="bottom" secondItem="Ze5-6b-2t3" secondAttribute="bottom" id="C4"/>
-            </constraints>
-          </view>
-        </viewController>
-        <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" sceneMemberID="firstResponder"/>
-      </objects>
-      <point key="canvasLocation" x="53" y="375"/>
-    </scene>
-  </scenes>
-  <resources>
-    <image name="LaunchScreen" width="393" height="852"/>
-  </resources>
-</document>
-XML
+
+          # 用 printf 写 storyboard 避免 heredoc 与 YAML 缩进冲突
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8" standalone="no"?>' \
+            '<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="22500" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" initialViewController="01J-lp-oVM">' \
+            '  <device id="retina6_12" orientation="portrait" appearance="light"/>' \
+            '  <dependencies>' \
+            '    <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="22500"/>' \
+            '    <capability name="Safe area layout guides" minToolsVersion="9.0"/>' \
+            '    <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>' \
+            '  </dependencies>' \
+            '  <scenes>' \
+            '    <scene sceneID="EHf-IW-A2E">' \
+            '      <objects>' \
+            '        <viewController id="01J-lp-oVM" sceneMemberID="viewController">' \
+            '          <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">' \
+            '            <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>' \
+            '            <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>' \
+            '            <subviews>' \
+            '              <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFill" horizontalHuggingPriority="251" verticalHuggingPriority="251" image="LaunchScreen" translatesAutoresizingMaskIntoConstraints="NO" id="LS0-KB-PxP">' \
+            '                <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>' \
+            '              </imageView>' \
+            '            </subviews>' \
+            '            <viewLayoutGuide key="safeArea" id="6Tk-OE-BBY"/>' \
+            '            <color key="backgroundColor" white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>' \
+            '            <constraints>' \
+            '              <constraint firstItem="LS0-KB-PxP" firstAttribute="top" secondItem="Ze5-6b-2t3" secondAttribute="top" id="C1"/>' \
+            '              <constraint firstItem="LS0-KB-PxP" firstAttribute="leading" secondItem="Ze5-6b-2t3" secondAttribute="leading" id="C2"/>' \
+            '              <constraint firstItem="LS0-KB-PxP" firstAttribute="trailing" secondItem="Ze5-6b-2t3" secondAttribute="trailing" id="C3"/>' \
+            '              <constraint firstItem="LS0-KB-PxP" firstAttribute="bottom" secondItem="Ze5-6b-2t3" secondAttribute="bottom" id="C4"/>' \
+            '            </constraints>' \
+            '          </view>' \
+            '        </viewController>' \
+            '        <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" sceneMemberID="firstResponder"/>' \
+            '      </objects>' \
+            '      <point key="canvasLocation" x="53" y="375"/>' \
+            '    </scene>' \
+            '  </scenes>' \
+            '  <resources>' \
+            '    <image name="LaunchScreen" width="393" height="852"/>' \
+            '  </resources>' \
+            '</document>' > "$STORYBOARD"
           echo "LaunchScreen.storyboard 已创建"
 
           if [ ! -f "$LAUNCH_SCREEN_SRC" ]; then
-            echo "::warning::未找到 OEM 启动页资源 ($LAUNCH_SCREEN_SRC)，storyboard 将使用纯白背景"
+            echo "::warning::未找到 OEM 启动页资源 ($LAUNCH_SCREEN_SRC)，使用 App Icon 占位"
             mkdir -p "$LAUNCH_SCREEN_SET"
-            cat > "$LAUNCH_SCREEN_SET/Contents.json" <<'JSON'
-{ "images" : [ { "filename" : "launchscreen.png", "idiom" : "universal", "scale" : "1x" } ], "info" : { "author" : "xcode", "version" : 1 } }
-JSON
             cp "$OEM_DIR/icons/app.png" "$LAUNCH_SCREEN_SET/launchscreen.png" 2>/dev/null || true
           else
             mkdir -p "$LAUNCH_SCREEN_SET"
             cp "$LAUNCH_SCREEN_SRC" "$LAUNCH_SCREEN_SET/launchscreen.png"
-            cat > "$LAUNCH_SCREEN_SET/Contents.json" <<'JSON'
-{ "images" : [ { "filename" : "launchscreen.png", "idiom" : "universal", "scale" : "1x" } ], "info" : { "author" : "xcode", "version" : 1 } }
-JSON
-            echo "✅ OEM 启动图已注入"
+            echo "OEM 启动图已注入"
           fi
+          printf '%s\n' '{ "images" : [ { "filename" : "launchscreen.png", "idiom" : "universal", "scale" : "1x" } ], "info" : { "author" : "xcode", "version" : 1 } }' > "$LAUNCH_SCREEN_SET/Contents.json"
 
           if [ ! -f "$ASSET_DIR/Contents.json" ]; then
             echo '{ "info" : { "author" : "xcode", "version" : 1 } }' > "$ASSET_DIR/Contents.json"
@@ -728,30 +722,14 @@ JSON
           if [ -f "$INFO_PLIST" ]; then
             /usr/libexec/PlistBuddy -c "Delete :UILaunchStoryboardName" "$INFO_PLIST" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Add :UILaunchStoryboardName string LaunchScreen" "$INFO_PLIST"
-            echo "✅ Launch Screen Info.plist 配置完成"
+            echo "Launch Screen Info.plist 配置完成"
           else
             echo "::warning::Info.plist 不存在"
           fi
 
           # 将 storyboard 注册到 Xcode 工程
           cd "$GITHUB_WORKSPACE/sdk-root"
-          ruby -e '
-            require "xcodeproj"
-            proj = Xcodeproj::Project.open("HBuilder-Hello/HBuilder-Hello.xcodeproj")
-            target = proj.targets.find { |t| t.product_type == "com.apple.product-type.application" }
-            main = proj.main_group
-            # 查找或创建 storyboard 引用
-            storyboard_name = "LaunchScreen.storyboard"
-            existing = main.recursive_children.find { |x| x.is_a?(Xcodeproj::Project::Object::PBXFileReference) && x.display_name == storyboard_name }
-            if existing.nil?
-              ref = main.new_file("HBuilder-Hello/#{storyboard_name}")
-              target.add_resources([ref]) if target
-              puts "✅ #{storyboard_name} 已注册到工程"
-            else
-              puts "✅ #{storyboard_name} 已存在于工程中"
-            end
-            proj.save
-          '
+          ruby -e 'require "xcodeproj"; proj = Xcodeproj::Project.open("HBuilder-Hello/HBuilder-Hello.xcodeproj"); target = proj.targets.find { |t| t.product_type == "com.apple.product-type.application" }; main = proj.main_group; storyboard_name = "LaunchScreen.storyboard"; existing = main.recursive_children.find { |x| x.is_a?(Xcodeproj::Project::Object::PBXFileReference) && x.display_name == storyboard_name }; if existing.nil?; ref = main.new_file("HBuilder-Hello/#{storyboard_name}"); target.add_resources([ref]) if target; puts "storyboard registered"; else; puts "storyboard exists"; end; proj.save'
 
       - name: Strip VCS metadata and shrink tree
         run: |
