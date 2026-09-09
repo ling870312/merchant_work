@@ -48,7 +48,9 @@ puts "Monitor-Player: #{n} 个源文件加入编译"
 # 由 prepare 工作流把 MobileVLCKit.xcframework 放置到 PlugIns/MobileVLCKit/。
 # 存在则 Link + Embed（该 framework 是动态库，必须同时 embed），并加 FRAMEWORK_SEARCH_PATHS。
 vlc_src_rel = 'HBuilder-Hello/HBuilder-Hello/PlugIns/MobileVLCKit'
-vlc_xcframework = Dir.glob(File.join(vlc_src_rel, '*.xcframework')).first
+# 递归查找：tar 包可能带一层包装目录，只查一级会漏命中并静默跳过，
+# 导致打出"没有 VLC 内核"的包（本项目 iOS 全部监控流都是 H265 TS/FMP4，缺它必黑屏）。
+vlc_xcframework = Dir.glob(File.join(vlc_src_rel, '**', '*.xcframework')).first
 if vlc_xcframework
   vlc = plugins.find_subpath('MobileVLCKit', true)
   vlc.path = 'MobileVLCKit'
@@ -58,7 +60,7 @@ if vlc_xcframework
   unless target.frameworks_build_phase.files.any? { |bf| bf.file_ref == vlc_ref }
     target.frameworks_build_phase.add_file_reference(vlc_ref)
   end
-  # Embed Frameworks（动态库必须 embed 到产物）
+  # Embed Frameworks（动态库必须 embed 到产物，并随包签名）
   embed_phase = target.copy_files_build_phases.find do |p|
     p.name.to_s == 'Embed Frameworks' || p.dst_subfolder_spec.to_s == '10'
   end
@@ -67,11 +69,21 @@ if vlc_xcframework
     embed_phase.dst_subfolder_spec = '10'
   end
   unless embed_phase.files.any? { |bf| bf.file_ref == vlc_ref }
-    embed_phase.add_file_reference(vlc_ref)
+    added_file = embed_phase.add_file_reference(vlc_ref)
+    added_file = added_file.first if added_file.is_a?(Array)
+    # 动态库必须 CodeSignOnCopy，否则 IPA 内 framework 可能未随宿主重签名。
+    if added_file.respond_to?(:settings=)
+      added_file.settings = { 'ATTRIBUTES' => ['CodeSignOnCopy', 'RemoveHeadersOnCopy'] }
+    end
   end
   puts "MobileVLCKit: 已 Link+Embed #{base}"
 else
-  puts 'MobileVLCKit: PlugIns/MobileVLCKit 下未找到 .xcframework，跳过（H265/RTMP 高级流将不可用）'
+  missing_message = 'MobileVLCKit: PlugIns/MobileVLCKit 下未找到 .xcframework（H265/TS/FMP4 高级流将不可用）'
+  # CI 侧设置 REQUIRE_MOBILEVLCKIT=1：缺 VLC 直接失败，禁止再产出"能装上但播不了监控"的包。
+  if ENV['REQUIRE_MOBILEVLCKIT'].to_s == '1'
+    abort "#{missing_message}；已设置 REQUIRE_MOBILEVLCKIT=1，中止构建。请检查 MobileVLCKit 资产是否解压到 #{vlc_src_rel}。"
+  end
+  puts "::warning::#{missing_message}"
 end
 
 # 2) TRTC framework Link + Embed，bundle 进 Resources

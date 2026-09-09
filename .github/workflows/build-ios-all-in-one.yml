@@ -443,6 +443,10 @@ jobs:
           echo "✅ DCUniModule.h: $DCU_FILE"
 
       - name: Integrate plugins (Ruby xcodeproj)
+        env:
+          # 本项目 iOS 全部监控流为 H265 TS/FMP4，缺 MobileVLCKit 必然黑屏；
+          # 缺内核时让集成脚本直接失败，禁止产出"能装上但播不了监控"的包。
+          REQUIRE_MOBILEVLCKIT: '1'
         run: |
           cd sdk-root
           ruby "$GITHUB_WORKSPACE/scripts/ci/integrate-plugins.rb"
@@ -512,7 +516,8 @@ jobs:
           if grep -q "MobileVLCKit" "$PROJ" 2>/dev/null; then
             echo "✅ MobileVLCKit 已 Link + Embed"
           else
-            echo "::warning::MobileVLCKit 未在工程中找到，H265/RTMP 高级流将不可用"
+            echo "::error::MobileVLCKit 未在工程中找到；iOS 全部监控流依赖该内核，构建中止"
+            exit 1
           fi
           PLUGIN_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello/PlugIns/DoorMasterMonitorPlayer"
           PLUGIN_FILES=$(ls "$PLUGIN_DIR"/*.m 2>/dev/null | wc -l || echo "0")
@@ -584,7 +589,7 @@ jobs:
           set -eu
           PLIST="sdk-root/HBuilder-Hello/HBuilder-Hello/HBuilder-Hello-Info.plist"
           [ -f "$PLIST" ] || { echo "::error::未找到 Info.plist: $PLIST"; exit 1; }
-          python3 repo/scripts/ci/inject-ios-config.py "$PLIST" \
+          python3 "$GITHUB_WORKSPACE/scripts/ci/inject-ios-config.py" "$PLIST" \
             --appkey "${IOS_DCLOUD_APPKEY}" \
             --display-name "${IOS_DISPLAY_NAME}" \
             --bundle-id "${IOS_BUNDLE_ID}" \
@@ -1065,10 +1070,10 @@ jobs:
           echo ""
           echo "========== 6. MobileVLCKit framework =========="
           if find "$APP_DIR/Frameworks" -maxdepth 1 -iname "*VLC*" 2>/dev/null | grep -q .; then
-            echo "✅ MobileVLCKit.framework 已嵌入 IPA（H265/RTMP 高级流可用）"
+            echo "✅ MobileVLCKit.framework 已嵌入 IPA（H265/TS/FMP4 监控流可用）"
           else
-            echo "::warning::MobileVLCKit.framework 未嵌入，advancedStreamReady 将为 false"
-            echo "::warning::基础 hls/mp4/fmp4 播放仍可用，不影响插件注册"
+            echo "::error::MobileVLCKit.framework 未嵌入 IPA；iOS 全部监控流为 H265 TS/FMP4，缺该内核必然无法播放"
+            fail=1
           fi
 
           echo ""

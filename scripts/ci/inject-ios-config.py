@@ -8,6 +8,7 @@
 - CFBundleIconName
 - CFBundleShortVersionString / CFBundleVersion（版本号）
 - 清理重复/损坏的隐私键并重写
+- UISupportedInterfaceOrientations（放开竖屏 + 横屏，监控播放器需要）
 
 用法: python3 inject-ios-config.py <Info.plist 路径> \
         --appkey <key> --display-name <name> --bundle-id <id> \
@@ -71,6 +72,24 @@ def main():
     pl['NSBluetoothAlwaysUsageDescription'] = '用于连接门店蓝牙设备（打印机、门禁控制器等）'
     pl['NSLocationWhenInUseUsageDescription'] = '用于获取门店位置、展示周边服务'
     print('隐私用途说明已清理并重写')
+
+    # 7. 屏幕方向：放开竖屏 + 横屏（门店监控播放器"横屏"需要）。
+    #    manifest.json 的 app-plus.screenOrientation 只对 DCloud 云打包生效；
+    #    离线 SDK 的 Info.plist 才是 UIKit 读取的权威来源，必须在这里显式写入，
+    #    否则监控播放页返回横屏掩码时与 App 级掩码无交集，present 会直接崩溃。
+    pl['UISupportedInterfaceOrientations'] = [
+        'UIInterfaceOrientationPortrait',
+        'UIInterfaceOrientationLandscapeLeft',
+        'UIInterfaceOrientationLandscapeRight',
+    ]
+    pl['UISupportedInterfaceOrientations~ipad'] = [
+        'UIInterfaceOrientationPortrait',
+        'UIInterfaceOrientationPortraitUpsideDown',
+        'UIInterfaceOrientationLandscapeLeft',
+        'UIInterfaceOrientationLandscapeRight',
+    ]
+    print('UISupportedInterfaceOrientations=' + ','.join(pl['UISupportedInterfaceOrientations']))
+    print('UISupportedInterfaceOrientations~ipad=' + ','.join(pl['UISupportedInterfaceOrientations~ipad']))
 
     with open(args.plist, 'wb') as f:
         plistlib.dump(pl, f)

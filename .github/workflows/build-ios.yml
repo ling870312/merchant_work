@@ -213,7 +213,7 @@ jobs:
         run: |
           PLIST="ios-project/${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}-Info.plist"
           [ -f "$PLIST" ] || { echo "::error::未找到 Info.plist: $PLIST"; exit 1; }
-          python3 repo/scripts/ci/inject-ios-config.py "$PLIST" \
+          python3 "$GITHUB_WORKSPACE/scripts/ci/inject-ios-config.py" "$PLIST" \
             --appkey "${IOS_DCLOUD_APPKEY}" \
             --display-name "${IOS_DISPLAY_NAME}" \
             --bundle-id "${IOS_BUNDLE_ID}" \
