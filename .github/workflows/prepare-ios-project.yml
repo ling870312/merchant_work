@@ -223,6 +223,8 @@ jobs:
       - name: Integrate plugins (Ruby xcodeproj)
         env:
           IOS_BUNDLE_ID: ${{ env.IOS_BUNDLE_ID }}
+          # 缺 MobileVLCKit 时直接失败，避免把"没有高级播放内核"的工程做成预集成产物。
+          REQUIRE_MOBILEVLCKIT: '1'
         run: |
           cd sdk-root
           ruby "$GITHUB_WORKSPACE/scripts/ci/integrate-plugins.rb"
@@ -325,7 +327,8 @@ jobs:
           if grep -q "MobileVLCKit" "$PROJ" 2>/dev/null; then
             echo "✅ MobileVLCKit 已 Link + Embed"
           else
-            echo "::warning::MobileVLCKit 未在工程中找到"
+            echo "::error::MobileVLCKit 未在工程中找到；iOS 全部监控流为 H265 TS/FMP4，缺该内核必然黑屏"
+            exit 1
           fi
           PLUGIN_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello/PlugIns/DoorMasterMonitorPlayer"
           PLUGIN_FILES=$(ls "$PLUGIN_DIR"/*.m 2>/dev/null | wc -l || echo "0")
