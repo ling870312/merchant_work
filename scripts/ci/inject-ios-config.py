@@ -9,6 +9,7 @@
 - CFBundleShortVersionString / CFBundleVersion（版本号）
 - 清理重复/损坏的隐私键并重写
 - UISupportedInterfaceOrientations（放开竖屏 + 横屏，监控播放器需要）
+- UIDeviceFamily=[1]（仅 iPhone，不声明 iPad 支持，避免 iPadOS 启动崩溃）
 
 用法: python3 inject-ios-config.py <Info.plist 路径> \
         --appkey <key> --display-name <name> --bundle-id <id> \
@@ -82,14 +83,9 @@ def main():
         'UIInterfaceOrientationLandscapeLeft',
         'UIInterfaceOrientationLandscapeRight',
     ]
-    pl['UISupportedInterfaceOrientations~ipad'] = [
-        'UIInterfaceOrientationPortrait',
-        'UIInterfaceOrientationPortraitUpsideDown',
-        'UIInterfaceOrientationLandscapeLeft',
-        'UIInterfaceOrientationLandscapeRight',
-    ]
+    pl['UIDeviceFamily'] = [1]
     print('UISupportedInterfaceOrientations=' + ','.join(pl['UISupportedInterfaceOrientations']))
-    print('UISupportedInterfaceOrientations~ipad=' + ','.join(pl['UISupportedInterfaceOrientations~ipad']))
+    print('UIDeviceFamily=' + str(pl['UIDeviceFamily']) + ' (iPhone only, no iPad)')
 
     with open(args.plist, 'wb') as f:
         plistlib.dump(pl, f)
