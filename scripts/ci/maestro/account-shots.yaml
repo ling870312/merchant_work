@@ -10,17 +10,25 @@ appId: ${APP_ID}
     timeout: 5000
 - takeScreenshot: ${PREFIX}-debug-launch
 
-# ATT / 通知等系统弹窗（存在则处理，不存在跳过；可能延迟出现，做两次）
+# ATT / 通知等系统弹窗（模拟器为英文，中英文都处理；可能延迟出现，做两次）
+- tapOn:
+    text: "Ask App Not to Track"
+    optional: true
 - tapOn:
     text: "要求.*不跟踪"
+    optional: true
+- waitForAnimationToEnd:
+    timeout: 2000
+- tapOn:
+    text: "Allow"
     optional: true
 - tapOn:
     text: "允许"
     optional: true
 - waitForAnimationToEnd:
-    timeout: 3000
+    timeout: 2000
 - tapOn:
-    text: "要求.*不跟踪"
+    text: "Ask App Not to Track"
     optional: true
 
 # 游客首页 → 登录页
@@ -29,6 +37,11 @@ appId: ${APP_ID}
     optional: true
 - tapOn:
     text: "立即登录"
+    optional: true
+- waitForAnimationToEnd:
+    timeout: 2000
+- tapOn:
+    text: "登录查看"
     optional: true
 
 - extendedWaitUntil:
