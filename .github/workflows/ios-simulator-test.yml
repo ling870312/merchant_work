@@ -360,7 +360,7 @@ jobs:
             '              </imageView>' \
             '            </subviews>' \
             '            <viewLayoutGuide key="safeArea" id="6Tk-OE-BBY"/>' \
-            '            <color key="backgroundColor" red="1" green="0.9647058823529412" blue="0.9019607843137255" alpha="1" colorSpace="custom" customSpace="sRGB"/>' \
+            '            <color key="backgroundColor" red="1" green="0.9647058823529412" blue="0.9019607843137255" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>' \
             '            <constraints>' \
             '              <constraint firstItem="LS0-KB-PxP" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="C1"/>' \
             '              <constraint firstItem="LS0-KB-PxP" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" id="C2"/>' \
