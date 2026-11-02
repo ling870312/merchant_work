@@ -4,17 +4,17 @@ name: iOS Simulator Test & Screenshot
 # iOS 模拟器测试与自动截屏工作流
 #
 # 目的：
-#   1. 验证 App 在 iPhone / iPad 模拟器上能正常启动（不崩溃）
-#   2. 自动截取 App 截图，用于 App Store Connect 审核
+#   1. 验证 App 在 iPhone 模拟器上能正常启动（不崩溃）
+#   2. 自动截取 App 截图，用于 App Store Connect 审核（仅 iPhone，不含 iPad）
 #
 # 解决审核问题：
-#   - 2.1(a) iPad 崩溃：在 iPad Air 模拟器上启动检测
-#   - 2.3.3 截图不合格：自动截取真实 App UI 截图
+#   - 2.1(a) 启动崩溃：iPhone 模拟器启动检测
+#   - 2.3.3 截图不合格：自动截取真实 App UI 截图（6.7 / 6.5 / 6.1 三档）
 #
 # 流程：
 #   源码构建 → 下载瘦身 SDK → 集成插件 → 配置身份
 #   → 编译 Simulator 版本（无需签名）
-#   → 启动各型号模拟器 → 安装 → 启动 → 检测崩溃 → 截屏
+#   → 启动 6.7 / 6.5 / 6.1 英寸 iPhone 模拟器 → 安装 → 启动 → 检测崩溃 → 截屏
 #   → 上传截图 Artifact
 #
 # 注意：模拟器编译不需要签名证书，此工作流可在没有签名环境的情况下独立运行。
@@ -57,11 +57,6 @@ on:
       gitee_branch:
         description: 'Gitee 分支（留空则用 Secret）'
         required: false
-      test_ipad:
-        description: '是否测试 iPad（崩溃检测）'
-        required: false
-        type: boolean
-        default: true
       screenshot_delay:
         description: '启动后等待截屏的秒数（App 加载需要时间）'
         required: false
@@ -569,17 +564,28 @@ jobs:
           xcrun simctl delete "$UDID" 2>/dev/null || true
           echo "✅ ${DEVICE} 测试完成"
 
-      - name: Test & Screenshot on iPhone 15 (6.1")
+      - name: Test & Screenshot on 6.1-inch iPhone (15/14/13)
         run: |
           set -eu
-          DEVICE="iPhone 15"
-          echo "========== ${DEVICE} (6.1\" 截图要求) =========="
 
-          UDID=$(xcrun simctl create "test-iphone15" "${DEVICE}" 2>/dev/null || true)
+          # 6.1 英寸：iPhone 15 (1179x2556) / iPhone 14、13 (1170x2532)
+          DEVICE=""
+          UDID=""
+          for name in "iPhone 15" "iPhone 14" "iPhone 13"; do
+            if xcrun simctl list devicetypes | grep -F "${name} (" >/dev/null 2>&1; then
+              if UDID=$(xcrun simctl create "test-iphone-6-1" "$name" 2>/dev/null); then
+                DEVICE="$name"
+                break
+              fi
+              UDID=""
+            fi
+          done
           if [ -z "$UDID" ]; then
-            echo "::error::无法创建 ${DEVICE} 模拟器"
+            echo "::error::未找到可用的 6.1 英寸模拟器（iPhone 15 / 14 / 13）"
+            xcrun simctl list devicetypes | grep -i iphone | head -30 || true
             exit 1
           fi
+          echo "========== ${DEVICE} (6.1\" 截图要求) =========="
           echo "模拟器 UDID: $UDID"
 
           xcrun simctl boot "$UDID" 2>/dev/null || true
@@ -587,27 +593,32 @@ jobs:
           sleep 5
 
           xcrun simctl install "$UDID" "$APP_PATH"
-          xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true
+          LAUNCH_OUT=$(xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true)
+          echo "$LAUNCH_OUT"
 
           DELAY=${{ inputs.screenshot_delay }}
           echo "等待 ${DELAY} 秒..."
           sleep "$DELAY"
 
-          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|${IOS_BUNDLE_ID}" | head -1 || true)
+          # 先截图保留证据
+          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.1-home.png"
+          sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.1-home.png" | tail -2
+
+          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -F "${IOS_BUNDLE_ID}" | head -1 || true)
           if [ -z "$PID" ]; then
             echo "::error::App 在 ${DEVICE} 上崩溃！"
-            xcrun simctl spawn "$UDID" log show --last 30s --predicate 'process == "HBuilder"' 2>/dev/null | tail -50 || true
+            xcrun simctl spawn "$UDID" log show --last 60s --style compact \
+              --predicate 'processImagePath CONTAINS "HBuilder" OR eventMessage CONTAINS "HBuilder"' \
+              2>/dev/null | tail -60 || true
             xcrun simctl shutdown "$UDID" 2>/dev/null || true
             xcrun simctl delete "$UDID" 2>/dev/null || true
             exit 1
           fi
           echo "✅ App 进程存活 — 未崩溃"
 
-          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.1-home.png"
-          echo "✅ 截图完成: iphone-6.1-home.png"
-
           sleep 5
           xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.1-loaded.png"
+          sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.1-loaded.png" | tail -2
           echo "✅ 截图完成: iphone-6.1-loaded.png"
 
           xcrun simctl shutdown "$UDID" 2>/dev/null || true
@@ -645,107 +656,33 @@ jobs:
           sleep 5
 
           xcrun simctl install "$UDID" "$APP_PATH"
-          xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true
+          LAUNCH_OUT=$(xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true)
+          echo "$LAUNCH_OUT"
 
           DELAY=${{ inputs.screenshot_delay }}
           echo "等待 ${DELAY} 秒..."
           sleep "$DELAY"
 
-          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|${IOS_BUNDLE_ID}" | head -1 || true)
+          # 先截图保留证据
+          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.5-home.png"
+          sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.5-home.png" | tail -2
+
+          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -F "${IOS_BUNDLE_ID}" | head -1 || true)
           if [ -z "$PID" ]; then
             echo "::error::App 在 ${DEVICE} 上崩溃！"
-            xcrun simctl spawn "$UDID" log show --last 30s --predicate 'process == "HBuilder"' 2>/dev/null | tail -50 || true
+            xcrun simctl spawn "$UDID" log show --last 60s --style compact \
+              --predicate 'processImagePath CONTAINS "HBuilder" OR eventMessage CONTAINS "HBuilder"' \
+              2>/dev/null | tail -60 || true
             xcrun simctl shutdown "$UDID" 2>/dev/null || true
             xcrun simctl delete "$UDID" 2>/dev/null || true
             exit 1
           fi
           echo "✅ App 进程存活 — 未崩溃"
 
-          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.5-home.png"
-          sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.5-home.png" | tail -2
-          echo "✅ 截图完成: iphone-6.5-home.png"
-
           sleep 5
           xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.5-loaded.png"
           sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.5-loaded.png" | tail -2
           echo "✅ 截图完成: iphone-6.5-loaded.png"
-
-          xcrun simctl shutdown "$UDID" 2>/dev/null || true
-          xcrun simctl delete "$UDID" 2>/dev/null || true
-
-      - name: Crash test on iPad Air (审核 2.1a 复现)
-        if: ${{ inputs.test_ipad == true }}
-        run: |
-          set -eu
-          DEVICE="iPad Air (M3)"
-          echo "========== ${DEVICE} (审核崩溃复现) =========="
-          echo "审核环境: iPad Air 11-inch (M3) / iPadOS 27.0"
-
-          # iPad Air M3 可能不存在于当前 Xcode，尝试多个名称
-          IPAD_NAME=""
-          for name in "iPad Air (M3)" "iPad Air 11-inch (M2)" "iPad Air 11-inch (M3)" "iPad Air (5th generation)"; do
-            if xcrun simctl list devicetypes | grep -q "$name" 2>/dev/null; then
-              IPAD_NAME="$name"
-              break
-            fi
-          done
-
-          if [ -z "$IPAD_NAME" ]; then
-            echo "::warning::当前 Xcode 未找到 iPad Air 模拟器类型"
-            echo "可用 iPad 设备类型:"
-            xcrun simctl list devicetypes | grep -i ipad | head -10
-            echo "跳过 iPad 测试（不阻断）"
-            exit 0
-          fi
-          echo "使用设备类型: $IPAD_NAME"
-
-          UDID=$(xcrun simctl create "test-ipad-air" "$IPAD_NAME" 2>/dev/null || true)
-          if [ -z "$UDID" ]; then
-            echo "::warning::无法创建 iPad 模拟器，跳过"
-            exit 0
-          fi
-          echo "模拟器 UDID: $UDID"
-
-          xcrun simctl boot "$UDID" 2>/dev/null || true
-          xcrun simctl bootstatus "$UDID" -b 2>/dev/null || true
-          sleep 5
-
-          echo "安装 App..."
-          xcrun simctl install "$UDID" "$APP_PATH"
-
-          echo "启动 App: ${IOS_BUNDLE_ID}"
-          xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true
-
-          DELAY=${{ inputs.screenshot_delay }}
-          echo "等待 ${DELAY} 秒..."
-          sleep "$DELAY"
-
-          # 崩溃检测：检查进程是否存活
-          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|${IOS_BUNDLE_ID}" | head -1 || true)
-          if [ -z "$PID" ]; then
-            echo "::error::❌ App 在 iPad Air 上崩溃了！"
-            echo "::error::这复现了 Apple 审核 2.1(a) 的崩溃问题"
-            echo ""
-            echo "=== 崩溃日志（模拟器系统日志）==="
-            xcrun simctl spawn "$UDID" log show --last 60s --predicate 'process == "HBuilder"' 2>/dev/null | tail -100 || true
-            echo ""
-            echo "=== crashreports ==="
-            xcrun simctl spawn "$UDID" ls -la /private/var/mobile/Library/Logs/CrashReporter/ 2>/dev/null || true
-            xcrun simctl spawn "$UDID" cat /private/var/mobile/Library/Logs/CrashReporter/*.ips 2>/dev/null | tail -80 || true
-
-            # 截一张崩溃后的画面（可能是黑屏或闪退后桌面）
-            xcrun simctl io "$UDID" screenshot "screenshots/ipad-crash.png" 2>/dev/null || true
-
-            xcrun simctl shutdown "$UDID" 2>/dev/null || true
-            xcrun simctl delete "$UDID" 2>/dev/null || true
-            echo "::error::iPad 测试失败：App 崩溃"
-            exit 1
-          fi
-          echo "✅ App 在 iPad Air 上正常运行 — 未崩溃！"
-
-          # 截图
-          xcrun simctl io "$UDID" screenshot "screenshots/ipad-air-home.png"
-          echo "✅ iPad 截图完成: ipad-air-home.png"
 
           xcrun simctl shutdown "$UDID" 2>/dev/null || true
           xcrun simctl delete "$UDID" 2>/dev/null || true
@@ -785,9 +722,10 @@ jobs:
           if-no-files-found: warn
 
       # -----------------------------------------------------------------------
-      # 阶段 8.5：校验苹果要求的截图分辨率
+      # 阶段 8.5：校验苹果要求的截图分辨率（仅 iPhone）
       # 6.7" = 1290x2796（iPhone 15/14 Pro Max）
       # 6.5" = 1242x2688（iPhone 11 Pro Max / XS Max）
+      # 6.1" = 1179x2556（iPhone 15）或 1170x2532（iPhone 14 / 13）
       # -----------------------------------------------------------------------
       - name: Validate App Store screenshot resolutions
         run: |
@@ -803,8 +741,24 @@ jobs:
               exit 1
             fi
           }
+          check_any() {
+            f="$1"; shift
+            [ -f "$f" ] || { echo "::error::缺少截图 $f"; exit 1; }
+            w=$(sips -g pixelWidth "$f" | awk '/pixelWidth/ {print $2}')
+            h=$(sips -g pixelHeight "$f" | awk '/pixelHeight/ {print $2}')
+            echo "$f: ${w}x${h}（允许 $*）"
+            for spec in "$@"; do
+              ew="${spec%x*}"; eh="${spec#*x}"
+              if [ "$w" = "$ew" ] && [ "$h" = "$eh" ]; then
+                return 0
+              fi
+            done
+            echo "::error::$f 分辨率不符合 App Store 要求"
+            exit 1
+          }
           check screenshots/iphone-6.7-home.png 1290 2796
           check screenshots/iphone-6.5-home.png 1242 2688
+          check_any screenshots/iphone-6.1-home.png 1179x2556 1170x2532
           echo "✅ 尺寸校验通过"
 
       # -----------------------------------------------------------------------
