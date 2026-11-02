@@ -458,11 +458,11 @@ jobs:
             ASSETCATALOG_COMPILER_APPICON_NAME="AppIcon" 2>&1 | tee "../xcodebuild-sim.log"
 
           echo "========== 查找编译产物 =========="
-          APP_PATH=$(find ../sim-build/Build/Products -name "*.app" -type d -path "*Release-iphonesimulator*" | head -1)
+          APP_PATH=$(find "$GITHUB_WORKSPACE/sim-build/Build/Products" -name "*.app" -type d -path "*Release-iphonesimulator*" | head -1)
           if [ -z "$APP_PATH" ]; then
             echo "::error::未找到编译产物 .app"
             echo "=== Build Products 目录 ==="
-            find ../sim-build/Build/Products -type d 2>/dev/null | head -20
+            find "$GITHUB_WORKSPACE/sim-build/Build/Products" -type d 2>/dev/null | head -20
             exit 1
           fi
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
@@ -519,7 +519,7 @@ jobs:
           sleep "$DELAY"
 
           # 检查进程是否存活（崩溃检测）
-          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|merchant\|laiyima" | head -1 || true)
+          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|${IOS_BUNDLE_ID}" | head -1 || true)
           if [ -z "$PID" ]; then
             echo "::error::App 进程未找到 — 可能已崩溃！"
             echo "=== 模拟器系统日志（最后 50 行）==="
@@ -572,7 +572,7 @@ jobs:
           echo "等待 ${DELAY} 秒..."
           sleep "$DELAY"
 
-          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|merchant\|laiyima" | head -1 || true)
+          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|${IOS_BUNDLE_ID}" | head -1 || true)
           if [ -z "$PID" ]; then
             echo "::error::App 在 ${DEVICE} 上崩溃！"
             xcrun simctl spawn "$UDID" log show --last 30s --predicate 'process == "HBuilder"' 2>/dev/null | tail -50 || true
@@ -630,7 +630,7 @@ jobs:
           echo "等待 ${DELAY} 秒..."
           sleep "$DELAY"
 
-          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|merchant\|laiyima" | head -1 || true)
+          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|${IOS_BUNDLE_ID}" | head -1 || true)
           if [ -z "$PID" ]; then
             echo "::error::App 在 ${DEVICE} 上崩溃！"
             xcrun simctl spawn "$UDID" log show --last 30s --predicate 'process == "HBuilder"' 2>/dev/null | tail -50 || true
@@ -700,7 +700,7 @@ jobs:
           sleep "$DELAY"
 
           # 崩溃检测：检查进程是否存活
-          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|merchant\|laiyima" | head -1 || true)
+          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|${IOS_BUNDLE_ID}" | head -1 || true)
           if [ -z "$PID" ]; then
             echo "::error::❌ App 在 iPad Air 上崩溃了！"
             echo "::error::这复现了 Apple 审核 2.1(a) 的崩溃问题"
