@@ -511,31 +511,52 @@ jobs:
 
           # 启动 App
           echo "启动 App: ${IOS_BUNDLE_ID}"
-          xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true
+          LAUNCH_OUT=$(xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true)
+          echo "$LAUNCH_OUT"
+          LAUNCH_PID=$(echo "$LAUNCH_OUT" | sed -n 's/.*: ([0-9][0-9]*)$/\1/p' | head -1)
 
           # 等待 App 加载
           DELAY=${{ inputs.screenshot_delay }}
           echo "等待 ${DELAY} 秒让 App 完全加载..."
           sleep "$DELAY"
 
+          # 先截图保留证据（即使 App 已退出也能看到当前画面）
+          echo "截图中..."
+          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.7-home.png"
+          sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.7-home.png" | tail -2
+          echo "✅ 截图完成: iphone-6.7-home.png"
+
           # 检查进程是否存活（崩溃检测）
-          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|${IOS_BUNDLE_ID}" | head -1 || true)
+          PID=""
+          if [ -n "$LAUNCH_PID" ]; then
+            PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | awk -v p="$LAUNCH_PID" '$1 == p { print; exit }' || true)
+          fi
+          if [ -z "$PID" ]; then
+            PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -F "${IOS_BUNDLE_ID}" | head -1 || true)
+          fi
           if [ -z "$PID" ]; then
             echo "::error::App 进程未找到 — 可能已崩溃！"
-            echo "=== 模拟器系统日志（最后 50 行）==="
-            xcrun simctl spawn "$UDID" log show --last 30s --predicate 'process == "HBuilder"' 2>/dev/null | tail -50 || true
+            echo "启动返回 PID: ${LAUNCH_PID:-未知}"
+            echo "=== launchctl list ==="
+            xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | tail -40 || true
+            echo "=== ps ==="
+            xcrun simctl spawn "$UDID" ps -A 2>/dev/null | tail -20 || true
+            echo "=== 模拟器系统日志（最后 60 行）==="
+            xcrun simctl spawn "$UDID" log show --last 60s --style compact \
+              --predicate 'processImagePath CONTAINS "HBuilder" OR eventMessage CONTAINS "HBuilder"' \
+              2>/dev/null | tail -60 || true
+            echo "=== 模拟器内 CrashReporter ==="
+            xcrun simctl spawn "$UDID" ls -la /private/var/mobile/Library/Logs/CrashReporter 2>/dev/null || true
+            xcrun simctl spawn "$UDID" sh -c 'for f in /private/var/mobile/Library/Logs/CrashReporter/*.ips; do [ -f "$f" ] || continue; echo "--- $f"; tail -60 "$f"; done' 2>/dev/null || true
+            echo "=== 宿主 DiagnosticReports ==="
+            ls -la "$HOME/Library/Logs/DiagnosticReports" 2>/dev/null | tail -20 || true
+            find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name "*HBuilder*" -type f 2>/dev/null | head -3 | while read -r f; do echo "--- $f"; tail -60 "$f"; done || true
             xcrun simctl shutdown "$UDID" 2>/dev/null || true
             xcrun simctl delete "$UDID" 2>/dev/null || true
             echo "::error::${DEVICE} 测试失败：App 启动后崩溃"
             exit 1
           fi
           echo "✅ App 进程存活（${PID}）— 未崩溃"
-
-          # 截图
-          echo "截图中..."
-          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.7-home.png"
-          sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.7-home.png" | tail -2
-          echo "✅ 截图完成: iphone-6.7-home.png"
 
           # 截第二张：等待几秒后再截（可能加载了更多内容）
           sleep 5
