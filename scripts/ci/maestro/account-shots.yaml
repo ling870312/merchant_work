@@ -51,12 +51,16 @@ appId: ${APP_ID}
     visible: "登录您的账户以继续"
     timeout: 30000
 
+# 先勾选协议（在密码框下方，键盘弹出前可点），再输入账号密码
+- tapOn: "我已阅读并同意"
 - tapOn: "请输入账号"
 - inputText: ${SCREENSHOT_USERNAME}
 - tapOn: "请输入密码"
 - inputText: ${SCREENSHOT_PASSWORD}
 - hideKeyboard
-- tapOn: "我已阅读并同意"
+- scrollUntilVisible:
+    element: "登 录"
+    direction: DOWN
 - tapOn: "登 录"
 
 # 登录成功回到首页
