@@ -34,6 +34,9 @@ def main():
     pl['NSPhotoLibraryUsageDescription'] = '用于上传商品图片、门店资料图片'
     pl['NSBluetoothAlwaysUsageDescription'] = '用于连接门店蓝牙设备（打印机、门禁控制器等）'
     pl['NSLocationWhenInUseUsageDescription'] = '用于获取门店位置、展示周边服务'
+    # ATT 请求必须配套该键，否则 iOS 会以 TCC 隐私违规直接终止 App
+    # （HBuilder/广告 SDK 启动时会调用 ATTrackingManager，缺失即崩溃）
+    pl['NSUserTrackingUsageDescription'] = '用于向您提供更相关的服务与内容，并改进产品体验'
 
     with open(p, 'wb') as f:
         plistlib.dump(pl, f)

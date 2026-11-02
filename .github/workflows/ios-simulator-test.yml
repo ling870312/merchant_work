@@ -513,7 +513,7 @@ jobs:
           echo "启动 App: ${IOS_BUNDLE_ID}"
           LAUNCH_OUT=$(xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true)
           echo "$LAUNCH_OUT"
-          LAUNCH_PID=$(echo "$LAUNCH_OUT" | sed -n 's/.*: ([0-9][0-9]*)$/\1/p' | head -1)
+          LAUNCH_PID=$(printf '%s\n' "$LAUNCH_OUT" | awk -F': ' '/: / { print $NF }' | tail -1 | tr -cd '0-9')
 
           # 等待 App 加载
           DELAY=${{ inputs.screenshot_delay }}

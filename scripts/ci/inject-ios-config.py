@@ -72,6 +72,8 @@ def main():
     pl['NSPhotoLibraryUsageDescription'] = '用于上传商品图片、门店资料图片'
     pl['NSBluetoothAlwaysUsageDescription'] = '用于连接门店蓝牙设备（打印机、门禁控制器等）'
     pl['NSLocationWhenInUseUsageDescription'] = '用于获取门店位置、展示周边服务'
+    # ATT 请求必须配套该键，否则 iOS 会以 TCC 隐私违规直接终止 App
+    pl['NSUserTrackingUsageDescription'] = '用于向您提供更相关的服务与内容，并改进产品体验'
     print('隐私用途说明已清理并重写')
 
     # 7. 屏幕方向：放开竖屏 + 横屏（门店监控播放器"横屏"需要）。
