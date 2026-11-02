@@ -6,11 +6,18 @@
 #   "building for 'iOS-simulator', but linking in object file ... built for 'iOS'"
 # 本脚本把 arm64 真机 Mach-O 的 platform 从 iOS(2) 改为 iOS Simulator(7)，
 # 不改任何代码/符号，仅绕过链接器的平台校验。正式 IPA 不受影响。
+#
+# 兼容三种容器：
+#   1. 普通 ar 静态库（!<arch>\n）
+#   2. lipo 生成的 fat 静态库（0xcafebabe + 多个 ar 切片）
+#   3. framework 内的 Mach-O（thin 或 fat）
 
 LC_BUILD_VERSION = 0x32
 LC_VERSION_MIN_IPHONEOS = 0x25
 PLATFORM_IOS = 2
 PLATFORM_IOS_SIMULATOR = 7
+AR_MAGIC = "!<arch>\n".b
+FAT_MAGIC = 0xcafebabe
 
 $stats = Hash.new(0)
 
@@ -60,37 +67,26 @@ end
 
 def patch_macho_bytes!(data)
   changed = 0
-
-  if data[0, 4] && data[0, 4].unpack1('N') == 0xcafebabe
+  if data[0, 4] && data[0, 4].unpack1('N') == FAT_MAGIC
     nfat = data[4, 4].to_s.unpack1('N').to_i
     nfat.times do |i|
       base = 8 + i * 20
-      offset = data[base + 8, 4].to_s.unpack1('N').to_i
+      off = data[base + 8, 4].to_s.unpack1('N').to_i
       size = data[base + 12, 4].to_s.unpack1('N').to_i
-      next if offset <= 0 || size <= 0 || offset + size > data.bytesize
-      slice = data[offset, size]
+      next if off <= 0 || size <= 0 || off + size > data.bytesize
+      slice = data[off, size]
       changed += patch_thin_macho!(slice)
-      data[offset, size] = slice
+      data[off, size] = slice
     end
   else
     changed += patch_thin_macho!(data)
   end
-
   changed
 end
 
-def patch_macho_file!(path)
-  data = File.binread(path)
-  changed = patch_macho_bytes!(data)
-  File.binwrite(path, data) if changed.positive?
-  changed
-end
-
-# 直接就地解析 ar 成员并改写 Mach-O 字节，不依赖 ar/libtool 解压重打包。
-def patch_archive!(path)
-  abs_path = File.expand_path(path)
-  data = File.binread(abs_path)
-  return 0 unless data[0, 8] == "!<arch>\n"
+# 就地解析 ar 容器，只改写成员内的 Mach-O 字节，不改变成员大小。
+def patch_archive_data!(data)
+  return 0 unless data[0, 8] == AR_MAGIC
 
   offset = 8
   changed = 0
@@ -102,7 +98,7 @@ def patch_archive!(path)
 
     name = header[0, 16].to_s.strip
     size = header[48, 10].to_s.strip.to_i
-    break unless header[58, 2] == "`\n"
+    break unless header[58, 2] == "`\n".b
 
     member_start = offset + 60
     member = data[member_start, size]
@@ -118,7 +114,7 @@ def patch_archive!(path)
       body = member[name_len..] || ''
     end
 
-    n = patch_macho_bytes!(body)
+    n = patch_embedded_binary!(body)
     if n.positive?
       body_offset = member_start + (member.bytesize - body.bytesize)
       data[body_offset, body.bytesize] = body
@@ -130,10 +126,42 @@ def patch_archive!(path)
   end
 
   $stats[:archive_objects] += objects
-  if changed.positive?
-    File.binwrite(abs_path, data)
-    $stats[:archive_repacked] += 1
+  $stats[:archive_repacked] += 1 if changed.positive?
+  changed
+end
+
+def patch_embedded_binary!(data)
+  if data[0, 8] == AR_MAGIC
+    patch_archive_data!(data)
+  else
+    patch_macho_bytes!(data)
   end
+end
+
+def patch_file!(path)
+  abs_path = File.expand_path(path)
+  data = File.binread(abs_path)
+  changed = 0
+
+  if data[0, 4] && data[0, 4].unpack1('N') == FAT_MAGIC
+    nfat = data[4, 4].to_s.unpack1('N').to_i
+    nfat.times do |i|
+      base = 8 + i * 20
+      off = data[base + 8, 4].to_s.unpack1('N').to_i
+      size = data[base + 12, 4].to_s.unpack1('N').to_i
+      next if off <= 0 || size <= 0 || off + size > data.bytesize
+      slice = data[off, size]
+      n = patch_embedded_binary!(slice)
+      if n.positive?
+        data[off, size] = slice
+        changed += n
+      end
+    end
+  else
+    changed += patch_embedded_binary!(data)
+  end
+
+  File.binwrite(abs_path, data) if changed.positive?
   changed
 end
 
@@ -147,27 +175,27 @@ end.select { |f| File.file?(f) }
 machos += roots.flat_map { |r| Dir.glob(File.join(r, '**', '*.dylib')) }
 
 puts "Simulator 构建：开始修补真机专用二进制"
-puts "  静态库: #{archives.length} 个"
-puts "  Framework/dylib: #{machos.length} 个"
+puts "  静态库: #{archives.length} 个，magic 分布: #{archives.map { |p| File.binread(p, 4).unpack1('H*') }.tally.inspect}"
+puts "  Framework/dylib: #{machos.length} 个，magic 分布: #{machos.map { |p| File.binread(p, 4).unpack1('H*') }.tally.inspect}"
 
 total = 0
 archives.each_with_index do |path, idx|
-  n = patch_archive!(path)
+  n = patch_file!(path)
   total += n
   $stats[:archives] += 1 if n.positive?
-  puts "  [#{idx + 1}/#{archives.length}] #{path}: #{n} 个对象改为 Simulator" if n.positive?
+  puts "  [#{idx + 1}/#{archives.length}] #{path}: #{n} 处改为 Simulator" if n.positive?
 end
 
 machos.each do |path|
-  n = patch_macho_file!(path)
+  n = patch_file!(path)
   total += n
   $stats[:frameworks] += 1 if n.positive?
-  puts "  #{path}: #{n} 个切片改为 Simulator" if n.positive?
+  puts "  #{path}: #{n} 处改为 Simulator" if n.positive?
 end
 
-puts "Simulator 构建：修补完成，共 #{total} 处 platform/version-min -> 7"
+puts "Simulator 构建：修补完成，共 #{total} 处 platform/version-min 处理"
 puts "  含改动的静态库: #{$stats[:archives]}，framework/dylib: #{$stats[:frameworks]}"
-puts "  已就地修补静态库: #{$stats[:archive_repacked]}，处理对象文件: #{$stats[:archive_objects]}"
+puts "  已就地修补静态库容器: #{$stats[:archive_repacked]}，处理对象文件: #{$stats[:archive_objects]}"
 if $stats[:version_min_removed].positive?
   puts "  已删除旧格式 LC_VERSION_MIN_IPHONEOS: #{$stats[:version_min_removed]} 处"
 end
