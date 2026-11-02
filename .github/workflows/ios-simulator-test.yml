@@ -749,6 +749,15 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+      - name: Upload Maestro artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-output-${{ inputs.oem_channel }}-${{ inputs.version_name }}
+          path: maestro-output/
+          retention-days: 7
+          if-no-files-found: warn
+
       # -----------------------------------------------------------------------
       # 阶段 8.5：校验苹果要求的截图分辨率（仅 iPhone）
       # 6.7" = 1290x2796（iPhone 15/14 Pro Max）

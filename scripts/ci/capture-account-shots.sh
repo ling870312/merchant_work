@@ -15,6 +15,7 @@ mkdir -p "$OUT_DIR" "$SHOT_DIR"
 export PATH="$HOME/.maestro/bin:$PATH"
 
 echo "Maestro 登录并截取 ${PREFIX} 业务页面..."
+set +e
 maestro test "$WORKSPACE/scripts/ci/maestro/account-shots.yaml" \
   --device="$UDID" \
   --test-output-dir="$OUT_DIR" \
@@ -22,9 +23,13 @@ maestro test "$WORKSPACE/scripts/ci/maestro/account-shots.yaml" \
   -e PREFIX="$PREFIX" \
   -e SCREENSHOT_USERNAME="$SCREENSHOT_USERNAME" \
   -e SCREENSHOT_PASSWORD="$SCREENSHOT_PASSWORD"
+MAESTRO_EXIT=$?
+set -e
 
+# 无论成功失败都把已生成的截图/诊断产物拷出来
 find "$OUT_DIR" -name "*.png" -type f | while read -r f; do
   cp "$f" "$SHOT_DIR/$(basename "$f")"
 done
 echo "业务页面截图："
 ls -la "$SHOT_DIR" | tail -25
+exit "$MAESTRO_EXIT"
