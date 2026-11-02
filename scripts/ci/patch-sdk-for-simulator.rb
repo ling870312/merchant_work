@@ -82,7 +82,10 @@ def patch_archive!(path)
   changed = 0
   Dir.mktmpdir do |dir|
     Dir.chdir(dir) do
-      system('ar', '-x', path, out: File::NULL, err: File::NULL) || return(0)
+      unless system('ar', '-x', path, out: File::NULL, err: File::NULL)
+        warn "::warning::解压静态库失败: #{path}"
+        return 0
+      end
       objects = members.select { |m| File.file?(m) }
       return 0 if objects.empty?
       objects.each { |obj| changed += patch_macho_file!(obj) }
