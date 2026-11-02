@@ -125,6 +125,10 @@ jobs:
           echo "GITEE_BRANCH_RESOLVED=$GITEE_BRANCH" >> "$GITHUB_ENV"
           echo "Cloned $(find repo -maxdepth 1 -mindepth 1 -type d | wc -l) top-level dirs"
 
+      - name: Patch inventory entry for screenshot build
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/ci/patch-screenshot-inventory.py" repo
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
