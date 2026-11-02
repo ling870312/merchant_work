@@ -1,0 +1,793 @@
+name: iOS Simulator Test & Screenshot
+
+# =============================================================================
+# iOS 模拟器测试与自动截屏工作流
+#
+# 目的：
+#   1. 验证 App 在 iPhone / iPad 模拟器上能正常启动（不崩溃）
+#   2. 自动截取 App 截图，用于 App Store Connect 审核
+#
+# 解决审核问题：
+#   - 2.1(a) iPad 崩溃：在 iPad Air 模拟器上启动检测
+#   - 2.3.3 截图不合格：自动截取真实 App UI 截图
+#
+# 流程：
+#   源码构建 → 下载瘦身 SDK → 集成插件 → 配置身份
+#   → 编译 Simulator 版本（无需签名）
+#   → 启动各型号模拟器 → 安装 → 启动 → 检测崩溃 → 截屏
+#   → 上传截图 Artifact
+#
+# 注意：模拟器编译不需要签名证书，此工作流可在没有签名环境的情况下独立运行。
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      oem_channel:
+        description: 'OEM 渠道码（须与 Secret 命名一致）'
+        required: true
+        default: 'laiyima'
+      version_name:
+        description: '版本号（仅用于标记截图，不影响构建）'
+        required: false
+        default: '1.0.288'
+      version_code:
+        description: '构建号（仅用于标记截图，不影响构建）'
+        required: false
+        default: '20600'
+      sdk_release_tag:
+        description: '瘦身 SDK 的 Release tag'
+        required: false
+        default: 'ios-sdk-slim'
+      mobilevlc_release_tag:
+        description: 'MobileVLCKit 二进制的 Release tag'
+        required: false
+        default: 'ios-mobilevlc-v1'
+      mobilevlc_asset_name:
+        description: 'MobileVLCKit 资产文件名'
+        required: false
+        default: 'MobileVLCKit.xcframework.tar.gz'
+      asset_repo:
+        description: '资产仓库'
+        required: false
+        default: 'ling870312/merchant_uniapp_v3'
+      gitee_repo:
+        description: 'Gitee 仓库 SSH 地址（留空则用 Secret）'
+        required: false
+      gitee_branch:
+        description: 'Gitee 分支（留空则用 Secret）'
+        required: false
+      test_ipad:
+        description: '是否测试 iPad（崩溃检测）'
+        required: false
+        type: boolean
+        default: true
+      screenshot_delay:
+        description: '启动后等待截屏的秒数（App 加载需要时间）'
+        required: false
+        default: '20'
+      login_username:
+        description: '测试账号手机号（留空则只截游客态页面）'
+        required: false
+      login_password:
+        description: '测试账号密码（留空则只截游客态页面）'
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-simtest-${{ inputs.oem_channel }}
+  cancel-in-progress: true
+
+env:
+  IOS_SCHEME: 'HBuilder'
+  IOS_PROJECT_NAME: 'HBuilder-Hello'
+
+jobs:
+  simulator-test:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      # -----------------------------------------------------------------------
+      # 阶段 0：取本仓库 CI 脚本
+      # -----------------------------------------------------------------------
+      - name: Checkout (CI 脚本)
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 阶段 1：拉取业务源码并构建 uni-app 资源
+      # -----------------------------------------------------------------------
+      - name: Clone source from Gitee (deploy key)
+        env:
+          GITEE_SSH_KEY: ${{ secrets.GITEE_SSH_KEY }}
+          GITEE_REPO: ${{ inputs.gitee_repo || secrets.GITEE_REPO }}
+          GITEE_BRANCH: ${{ inputs.gitee_branch || secrets.GITEE_BRANCH }}
+        run: |
+          set -eu
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$GITEE_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          if [ ! -s ~/.ssh/id_ed25519 ]; then
+            echo "::error::GITEE_SSH_KEY 为空，请检查 GitHub Secret"
+            exit 1
+          fi
+          [ -n "$GITEE_REPO" ] || { echo "::error::Gitee 仓库地址为空"; exit 1; }
+          [ -n "$GITEE_BRANCH" ] || { echo "::error::Gitee 分支为空"; exit 1; }
+          ssh-keyscan -t ed25519 gitee.com >> ~/.ssh/known_hosts 2>/dev/null || true
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/id_ed25519"
+          ok=0
+          for i in 1 2 3; do
+            if git clone --depth 1 -b "$GITEE_BRANCH" "$GITEE_REPO" repo; then ok=1; break; fi
+            echo "第 $i 次克隆失败，10 秒后重试..."
+            rm -rf repo; sleep 10
+          done
+          rm -f ~/.ssh/id_ed25519
+          [ "$ok" = "1" ] || { echo "::error::Gitee 克隆 3 次均失败"; exit 1; }
+          echo "GITEE_BRANCH_RESOLVED=$GITEE_BRANCH" >> "$GITHUB_ENV"
+          echo "Cloned $(find repo -maxdepth 1 -mindepth 1 -type d | wc -l) top-level dirs"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'repo/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: repo
+
+      - name: Apply OEM config (${{ inputs.oem_channel }})
+        run: pwsh -ExecutionPolicy Bypass -File scripts/apply-oem-config.ps1 -OemChannel "${{ inputs.oem_channel }}" -SkipSigning
+        shell: bash
+        working-directory: repo
+
+      - name: Sync theme assets (tabbar icons)
+        run: pwsh -ExecutionPolicy Bypass -File scripts/sync-theme-assets.ps1
+        shell: bash
+        working-directory: repo
+        continue-on-error: true
+
+      - name: Set versionChannel=release in appBuildInfo.json
+        run: |
+          python3 -c "
+          import json
+          p = 'src/config/appBuildInfo.json'
+          with open(p, 'r', encoding='utf-8') as f:
+              d = json.load(f)
+          d['versionChannel'] = 'release'
+          with open(p, 'w', encoding='utf-8') as f:
+              json.dump(d, f, indent=2)
+          print('versionChannel=release')
+          "
+        working-directory: repo
+
+      - name: Build Uni-app App resources
+        run: npx uni build -p app
+        shell: bash
+        working-directory: repo
+        env:
+          NODE_ENV: production
+
+      - name: Verify app resources
+        run: |
+          if [ ! -d "dist/build/app" ]; then
+            echo "::error::dist/build/app 不存在，Uni-app 资源构建失败"
+            exit 1
+          fi
+          echo "App resources built"
+        working-directory: repo
+
+      # -----------------------------------------------------------------------
+      # 阶段 2：下载瘦身 SDK 与播放内核
+      # -----------------------------------------------------------------------
+      - name: Install xcodeproj gem
+        run: gem install xcodeproj --no-document
+
+      - name: Download slim SDK
+        env:
+          GH_TOKEN: ${{ secrets.ASSET_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::未配置 Secret ASSET_PAT"; exit 1; }
+          gh release download "${{ inputs.sdk_release_tag }}" \
+            --repo "${{ inputs.asset_repo }}" \
+            --pattern "ios-sdk-slim.tar.gz" --clobber --dir .
+          mkdir -p sdk-root
+          tar -xzf ios-sdk-slim.tar.gz -C sdk-root
+          rm -f ios-sdk-slim.tar.gz
+          echo "SDK 解压完成"
+
+      - name: Download MobileVLCKit
+        env:
+          GH_TOKEN: ${{ secrets.ASSET_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          VLC_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello/PlugIns/MobileVLCKit"
+          mkdir -p "$VLC_DIR"
+          if ! gh release download "${{ inputs.mobilevlc_release_tag }}" \
+              --repo "${{ inputs.asset_repo }}" \
+              --pattern "${{ inputs.mobilevlc_asset_name }}" --clobber --dir .; then
+            echo "::error::未找到 MobileVLCKit 资产"
+            exit 1
+          fi
+          tar -xzf "${{ inputs.mobilevlc_asset_name }}" -C "$VLC_DIR"
+          rm -f "${{ inputs.mobilevlc_asset_name }}"
+          echo "MobileVLCKit 就位"
+
+      - name: Copy plugins into project
+        run: |
+          T=sdk-root/HBuilder-Hello/HBuilder-Hello
+          mkdir -p "$T/PlugIns/DoorMasterMonitorPlayer"
+          cp repo/nativeplugins/DoorMaster-Monitor-Player/ios/*.h "$T/PlugIns/DoorMasterMonitorPlayer/" 2>/dev/null || true
+          cp repo/nativeplugins/DoorMaster-Monitor-Player/ios/*.m "$T/PlugIns/DoorMasterMonitorPlayer/"
+          echo "插件文件已就位"
+
+      # -----------------------------------------------------------------------
+      # 阶段 3：解析渠道身份
+      # -----------------------------------------------------------------------
+      - name: Compute iOS channel identity
+        env:
+          CHANNEL_APPKEY: ${{ secrets[format('DLOUD_APPKEY_{0}', inputs.oem_channel)] }}
+        run: |
+          set -eu
+          CHANNEL="${{ inputs.oem_channel }}"
+          eval "$(bash repo/scripts/ci/read-ios-channel.sh "$PWD/repo" "$CHANNEL")"
+          [ -n "$CHANNEL_IOS_BUNDLE_ID" ] || { echo "::error::渠道 bundleId 为空"; exit 1; }
+          [ -n "$CHANNEL_IOS_APPID" ] || { echo "::error::渠道 appid 为空"; exit 1; }
+          APPKEY="${CHANNEL_APPKEY:-}"
+          [ -n "$APPKEY" ] || { echo "::error::未配置渠道 ${CHANNEL} 的 DCloud appkey Secret"; exit 1; }
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_BUNDLE_ID"
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_APPID"
+          printf "::add-mask::%s\n" "$APPKEY"
+          printf "::add-mask::%s\n" "$CHANNEL_IOS_DISPLAY_NAME"
+          echo "IOS_BUNDLE_ID=$CHANNEL_IOS_BUNDLE_ID" >> "$GITHUB_ENV"
+          echo "IOS_DISPLAY_NAME=$CHANNEL_IOS_DISPLAY_NAME" >> "$GITHUB_ENV"
+          echo "DLOUD_APPID=$CHANNEL_IOS_APPID" >> "$GITHUB_ENV"
+          echo "IOS_DCLOUD_APPKEY=$APPKEY" >> "$GITHUB_ENV"
+          echo "channel identity loaded: $CHANNEL"
+
+      # -----------------------------------------------------------------------
+      # 阶段 4：集成原生插件
+      # -----------------------------------------------------------------------
+      - name: Integrate plugins (Ruby xcodeproj)
+        env:
+          REQUIRE_MOBILEVLCKIT: '1'
+        run: |
+          cd sdk-root
+          ruby "$GITHUB_WORKSPACE/scripts/ci/integrate-plugins.rb"
+          echo "插件集成完成"
+
+      - name: Inject feature.plist and uniplugins
+        run: |
+          cd sdk-root
+          python3 "$GITHUB_WORKSPACE/scripts/ci/inject-ios-feature-plist.py" .
+          INFO_PLIST="HBuilder-Hello/HBuilder-Hello/HBuilder-Hello-Info.plist"
+          python3 "$GITHUB_WORKSPACE/scripts/ci/inject-ios-uniplugins.py" \
+            "$INFO_PLIST" "$GITHUB_WORKSPACE/repo/src/manifest.json" \
+            --plugin-id DoorMaster-Monitor-Player
+
+      - name: Configure Info.plist and control.xml
+        run: |
+          set -eu
+          PLIST="sdk-root/HBuilder-Hello/HBuilder-Hello/HBuilder-Hello-Info.plist"
+          [ -f "$PLIST" ] || { echo "::error::未找到 Info.plist"; exit 1; }
+          python3 "$GITHUB_WORKSPACE/scripts/ci/inject-ios-config.py" "$PLIST" \
+            --appkey "${IOS_DCLOUD_APPKEY}" \
+            --display-name "${IOS_DISPLAY_NAME}" \
+            --bundle-id "${IOS_BUNDLE_ID}" \
+            --version-name "${{ inputs.version_name }}" \
+            --version-code "${{ inputs.version_code }}"
+          python3 "$GITHUB_WORKSPACE/scripts/ci/clean-privacy-strings.py" "$PLIST"
+
+          PROJECT_DIR="sdk-root/HBuilder-Hello/HBuilder-Hello"
+          while IFS= read -r f; do
+            printf '"CFBundleDisplayName" = "%s";\n"CFBundleName" = "Merchant";\n' "${IOS_DISPLAY_NAME}" > "$f"
+          done < <(find "$PROJECT_DIR" -name "InfoPlist.strings" -type f)
+
+          CTRL="sdk-root/HBuilder-Hello/HBuilder-Hello/control.xml"
+          [ -f "$CTRL" ] || { echo "::error::未找到 control.xml"; exit 1; }
+          sed -i '' "s/__UNI__33C5XXX/$DLOUD_APPID/g" "$CTRL"
+          sed -i '' 's/debug="true"/debug="false"/g' "$CTRL"
+
+          APPS="sdk-root/HBuilder-Hello/HBuilder-Hello/Pandora/apps"
+          rm -rf "$APPS"/*
+          mkdir -p "$APPS/${DLOUD_APPID}"
+          PANDORA_API_APPS="sdk-root/HBuilder-Hello/HBuilder-Hello/PandoraApi.bundle/apps"
+          if [ -d "$PANDORA_API_APPS" ]; then
+            rm -rf "$PANDORA_API_APPS"/*
+          fi
+
+      - name: Sync Uni-app www into iOS project
+        run: |
+          set -eu
+          WWW_DEST="sdk-root/${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}/Pandora/apps/${DLOUD_APPID}/www"
+          mkdir -p "$(dirname "$WWW_DEST")"
+          rm -rf "$WWW_DEST"
+          cp -r repo/dist/build/app "$WWW_DEST"
+          APPS_DIR="sdk-root/${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}/Pandora/apps"
+          for d in "$APPS_DIR"/*/; do
+            dir_name=$(basename "$d")
+            [ "$dir_name" = "$DLOUD_APPID" ] || { rm -rf "$d"; echo "已清理 SDK Demo app"; }
+          done
+          echo "Synced www into iOS project"
+
+      - name: Inject App Icon
+        run: |
+          set -eu
+          OEM_DIR="repo/oem_config/${{ inputs.oem_channel }}"
+          ICON_REL="$(python3 -c "
+          import json, sys
+          try:
+              cfg = json.load(open(sys.argv[1] + '/oem.json', encoding='utf-8'))
+              print((cfg.get('ios') or {}).get('appIcon') or 'icons/app.png')
+          except Exception:
+              print('icons/app.png')
+          " "$OEM_DIR")"
+          ICON_SRC="$OEM_DIR/$ICON_REL"
+          [ -f "$ICON_SRC" ] || { echo "::error::未找到 App 图标"; exit 1; }
+          bash repo/scripts/ci/sync-ios-appicons.sh "$ICON_SRC" "$GITHUB_WORKSPACE/sdk-root/HBuilder-Hello"
+          echo "App 图标注入完成"
+
+      - name: Inject Launch Screen
+        run: |
+          set -u
+          OEM_DIR="repo/oem_config/${{ inputs.oem_channel }}"
+          LAUNCH_SCREEN_SRC="$OEM_DIR/launchscreen/launchscreen.png"
+          APP_SRC="$GITHUB_WORKSPACE/sdk-root/HBuilder-Hello/HBuilder-Hello"
+          ASSET_DIR="$APP_SRC/Assets.xcassets"
+          LAUNCH_SCREEN_SET="$ASSET_DIR/LaunchScreen.imageset"
+          STORYBOARD="$APP_SRC/LaunchScreen.storyboard"
+
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8" standalone="no"?>' \
+            '<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="22500" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" initialViewController="01J-lp-oVM">' \
+            '  <device id="retina6_12" orientation="portrait" appearance="light"/>' \
+            '  <dependencies>' \
+            '    <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="22500"/>' \
+            '    <capability name="Safe area layout guides" minToolsVersion="9.0"/>' \
+            '    <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>' \
+            '  </dependencies>' \
+            '  <scenes>' \
+            '    <scene sceneID="EHf-IW-A2E">' \
+            '      <objects>' \
+            '        <viewController id="01J-lp-oVM" sceneMemberID="viewController">' \
+            '          <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">' \
+            '            <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>' \
+            '            <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>' \
+            '            <subviews>' \
+            '              <imageView clipsSubviews="NO" userInteractionEnabled="NO" contentMode="scaleAspectFit" horizontalHuggingPriority="251" verticalHuggingPriority="251" image="LaunchScreen" translatesAutoresizingMaskIntoConstraints="NO" id="LS0-KB-PxP">' \
+            '                <rect key="frame" x="0.0" y="0.0" width="200" height="200"/>' \
+            '              </imageView>' \
+            '            </subviews>' \
+            '            <viewLayoutGuide key="safeArea" id="6Tk-OE-BBY"/>' \
+            '            <color key="backgroundColor" red="1" green="0.9647058823529412" blue="0.9019607843137255" alpha="1" colorSpace="custom" customSpace="sRGB"/>' \
+            '            <constraints>' \
+            '              <constraint firstItem="LS0-KB-PxP" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="C1"/>' \
+            '              <constraint firstItem="LS0-KB-PxP" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" id="C2"/>' \
+            '              <constraint firstItem="LS0-KB-PxP" firstAttribute="width" relation="lessThanOrEqual" secondItem="Ze5-6b-2t3" secondAttribute="width" multiplier="0.5" id="C3"/>' \
+            '              <constraint firstItem="LS0-KB-PxP" firstAttribute="width" relation="lessThanOrEqual" secondItem="Ze5-6b-2t3" secondAttribute="height" multiplier="0.3" id="C4"/>' \
+            '              <constraint firstItem="LS0-KB-PxP" firstAttribute="width" priority="750" constant="200" id="C5"/>' \
+            '              <constraint firstItem="LS0-KB-PxP" firstAttribute="height" secondItem="LS0-KB-PxP" secondAttribute="width" id="C6"/>' \
+            '            </constraints>' \
+            '          </view>' \
+            '        </viewController>' \
+            '        <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" sceneMemberID="firstResponder"/>' \
+            '      </objects>' \
+            '      <point key="canvasLocation" x="53" y="375"/>' \
+            '    </scene>' \
+            '  </scenes>' \
+            '  <resources>' \
+            '    <image name="LaunchScreen" width="200" height="200"/>' \
+            '  </resources>' \
+            '</document>' > "$STORYBOARD"
+          echo "LaunchScreen.storyboard 已创建"
+
+          if [ ! -f "$LAUNCH_SCREEN_SRC" ]; then
+            mkdir -p "$LAUNCH_SCREEN_SET"
+            cp "$OEM_DIR/icons/app.png" "$LAUNCH_SCREEN_SET/launchscreen.png" 2>/dev/null || true
+          else
+            mkdir -p "$LAUNCH_SCREEN_SET"
+            cp "$LAUNCH_SCREEN_SRC" "$LAUNCH_SCREEN_SET/launchscreen.png"
+          fi
+          printf '%s\n' '{ "images" : [ { "filename" : "launchscreen.png", "idiom" : "universal", "scale" : "1x" } ], "info" : { "author" : "xcode", "version" : 1 } }' > "$LAUNCH_SCREEN_SET/Contents.json"
+
+          if [ ! -f "$ASSET_DIR/Contents.json" ]; then
+            echo '{ "info" : { "author" : "xcode", "version" : 1 } }' > "$ASSET_DIR/Contents.json"
+          fi
+
+          INFO_PLIST="$APP_SRC/HBuilder-Hello-Info.plist"
+          if [ -f "$INFO_PLIST" ]; then
+            /usr/libexec/PlistBuddy -c "Delete :UILaunchStoryboardName" "$INFO_PLIST" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :UILaunchStoryboardName string LaunchScreen" "$INFO_PLIST"
+          fi
+
+          cd "$GITHUB_WORKSPACE/sdk-root"
+          ruby -e 'require "xcodeproj"; proj = Xcodeproj::Project.open("HBuilder-Hello/HBuilder-Hello.xcodeproj"); target = proj.targets.find { |t| t.product_type == "com.apple.product-type.application" }; main = proj.main_group; storyboard_name = "LaunchScreen.storyboard"; existing = main.recursive_children.find { |x| x.is_a?(Xcodeproj::Project::Object::PBXFileReference) && x.display_name == storyboard_name }; if existing.nil?; ref = main.new_file("HBuilder-Hello/#{storyboard_name}"); target.add_resources([ref]) if target; puts "storyboard registered"; else; puts "storyboard exists"; end; proj.save'
+
+      - name: Strip VCS metadata and shrink tree
+        run: |
+          find sdk-root/SDK -name '.git' -type d -exec rm -rf {} + 2>/dev/null || true
+          find sdk-root/HBuilder-Hello -name '.git' -type d -exec rm -rf {} + 2>/dev/null || true
+          rm -rf sdk-root/SDK/Doc sdk-root/SDK/Examples sdk-root/SDK/Samples 2>/dev/null || true
+          echo "工程树已精简"
+
+      # -----------------------------------------------------------------------
+      # 阶段 5：选择 Xcode
+      # -----------------------------------------------------------------------
+      - name: Select Xcode
+        run: |
+          set -eu
+          echo "=== 已安装的 Xcode ==="
+          ls -la /Applications | grep -i xcode || true
+          XCODE_APP=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$XCODE_APP" ] || { echo "::error::未找到 Xcode"; exit 1; }
+          echo "选择: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP"
+          echo "DEVELOPER_DIR=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
+          if [ -L /Applications/Xcode.app ]; then
+            sudo rm -f /Applications/Xcode.app
+          fi
+          xcodebuild -version
+          echo "=== 模拟器列表 ==="
+          xcrun simctl list devices available | grep -E "iPhone|iPad" | head -30
+
+      # -----------------------------------------------------------------------
+      # 阶段 6：编译 Simulator 版本（无需签名）
+      # -----------------------------------------------------------------------
+      - name: Build for iOS Simulator
+        run: |
+          set -eo pipefail
+          echo "========== 编译 Simulator 版本 =========="
+          cd sdk-root
+          xcodebuild build \
+            -project "${IOS_PROJECT_NAME}/${IOS_PROJECT_NAME}.xcodeproj" \
+            -scheme "${IOS_SCHEME}" \
+            -configuration Release \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "../sim-build" \
+            -sdk iphonesimulator \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ASSETCATALOG_COMPILER_APPICON_NAME="AppIcon" 2>&1 | tee "../xcodebuild-sim.log"
+
+          echo "========== 查找编译产物 =========="
+          APP_PATH=$(find ../sim-build/Build/Products -name "*.app" -type d -path "*Release-iphonesimulator*" | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::未找到编译产物 .app"
+            echo "=== Build Products 目录 ==="
+            find ../sim-build/Build/Products -type d 2>/dev/null | head -20
+            exit 1
+          fi
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          echo "✅ 编译产物: $APP_PATH"
+          ls -la "$APP_PATH"
+
+      # -----------------------------------------------------------------------
+      # 阶段 7：模拟器测试 + 截图
+      # -----------------------------------------------------------------------
+      - name: Test & Screenshot on 6.7-inch iPhone (15/14 Pro Max)
+        run: |
+          set -eu
+          mkdir -p screenshots
+
+          # 6.7 英寸槽位要求 1290x2796：优先 iPhone 15 Pro Max，回退 iPhone 14 Pro Max
+          DEVICE=""
+          UDID=""
+          for name in "iPhone 15 Pro Max" "iPhone 14 Pro Max"; do
+            if xcrun simctl list devicetypes | grep -F "${name} (" >/dev/null 2>&1; then
+              if UDID=$(xcrun simctl create "test-iphone-6-7" "$name" 2>/dev/null); then
+                DEVICE="$name"
+                break
+              fi
+              UDID=""
+            fi
+          done
+          if [ -z "$UDID" ]; then
+            echo "::error::未找到可用的 6.7 英寸模拟器（iPhone 15 Pro Max / 14 Pro Max）"
+            xcrun simctl list devicetypes | grep -i iphone | head -30 || true
+            exit 1
+          fi
+          echo "========== ${DEVICE} (6.7\" 截图要求, 1290x2796) =========="
+          echo "模拟器 UDID: $UDID"
+
+          # 启动
+          xcrun simctl boot "$UDID" 2>/dev/null || true
+          sleep 10
+
+          # 等待模拟器完全启动
+          xcrun simctl bootstatus "$UDID" -b 2>/dev/null || true
+          sleep 5
+
+          # 安装 App
+          echo "安装 App: $APP_PATH"
+          xcrun simctl install "$UDID" "$APP_PATH"
+
+          # 启动 App
+          echo "启动 App: ${IOS_BUNDLE_ID}"
+          xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true
+
+          # 等待 App 加载
+          DELAY=${{ inputs.screenshot_delay }}
+          echo "等待 ${DELAY} 秒让 App 完全加载..."
+          sleep "$DELAY"
+
+          # 检查进程是否存活（崩溃检测）
+          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|merchant\|laiyima" | head -1 || true)
+          if [ -z "$PID" ]; then
+            echo "::error::App 进程未找到 — 可能已崩溃！"
+            echo "=== 模拟器系统日志（最后 50 行）==="
+            xcrun simctl spawn "$UDID" log show --last 30s --predicate 'process == "HBuilder"' 2>/dev/null | tail -50 || true
+            xcrun simctl shutdown "$UDID" 2>/dev/null || true
+            xcrun simctl delete "$UDID" 2>/dev/null || true
+            echo "::error::${DEVICE} 测试失败：App 启动后崩溃"
+            exit 1
+          fi
+          echo "✅ App 进程存活（${PID}）— 未崩溃"
+
+          # 截图
+          echo "截图中..."
+          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.7-home.png"
+          sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.7-home.png" | tail -2
+          echo "✅ 截图完成: iphone-6.7-home.png"
+
+          # 截第二张：等待几秒后再截（可能加载了更多内容）
+          sleep 5
+          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.7-loaded.png"
+          sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.7-loaded.png" | tail -2
+          echo "✅ 截图完成: iphone-6.7-loaded.png"
+
+          # 清理
+          xcrun simctl shutdown "$UDID" 2>/dev/null || true
+          xcrun simctl delete "$UDID" 2>/dev/null || true
+          echo "✅ ${DEVICE} 测试完成"
+
+      - name: Test & Screenshot on iPhone 15 (6.1")
+        run: |
+          set -eu
+          DEVICE="iPhone 15"
+          echo "========== ${DEVICE} (6.1\" 截图要求) =========="
+
+          UDID=$(xcrun simctl create "test-iphone15" "${DEVICE}" 2>/dev/null || true)
+          if [ -z "$UDID" ]; then
+            echo "::error::无法创建 ${DEVICE} 模拟器"
+            exit 1
+          fi
+          echo "模拟器 UDID: $UDID"
+
+          xcrun simctl boot "$UDID" 2>/dev/null || true
+          xcrun simctl bootstatus "$UDID" -b 2>/dev/null || true
+          sleep 5
+
+          xcrun simctl install "$UDID" "$APP_PATH"
+          xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true
+
+          DELAY=${{ inputs.screenshot_delay }}
+          echo "等待 ${DELAY} 秒..."
+          sleep "$DELAY"
+
+          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|merchant\|laiyima" | head -1 || true)
+          if [ -z "$PID" ]; then
+            echo "::error::App 在 ${DEVICE} 上崩溃！"
+            xcrun simctl spawn "$UDID" log show --last 30s --predicate 'process == "HBuilder"' 2>/dev/null | tail -50 || true
+            xcrun simctl shutdown "$UDID" 2>/dev/null || true
+            xcrun simctl delete "$UDID" 2>/dev/null || true
+            exit 1
+          fi
+          echo "✅ App 进程存活 — 未崩溃"
+
+          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.1-home.png"
+          echo "✅ 截图完成: iphone-6.1-home.png"
+
+          sleep 5
+          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.1-loaded.png"
+          echo "✅ 截图完成: iphone-6.1-loaded.png"
+
+          xcrun simctl shutdown "$UDID" 2>/dev/null || true
+          xcrun simctl delete "$UDID" 2>/dev/null || true
+
+      - name: Test & Screenshot on 6.5-inch iPhone (11 Pro Max / XS Max)
+        run: |
+          set -eu
+
+          # 6.5 英寸槽位要求 1242x2688：仅 iPhone 11 Pro Max / XS Max 满足
+          # 注意：iPhone 15 Plus 是 6.7 英寸（1290x2796），不能用于 6.5 英寸槽位
+          DEVICE=""
+          UDID=""
+          for name in "iPhone 11 Pro Max" "iPhone XS Max"; do
+            if xcrun simctl list devicetypes | grep -F "${name} (" >/dev/null 2>&1; then
+              if UDID=$(xcrun simctl create "test-iphone-6-5" "$name" 2>/dev/null); then
+                DEVICE="$name"
+                break
+              fi
+              UDID=""
+            fi
+          done
+          if [ -z "$UDID" ]; then
+            echo "::error::未找到可用的 6.5 英寸模拟器（iPhone 11 Pro Max / XS Max）"
+            echo "当前 Xcode 无法产出 1242x2688 截图，苹果 6.5 英寸槽位会拒收"
+            xcrun simctl list devicetypes | grep -i iphone | head -30 || true
+            xcrun simctl list runtimes || true
+            exit 1
+          fi
+          echo "========== ${DEVICE} (6.5\" 截图要求, 1242x2688) =========="
+          echo "模拟器 UDID: $UDID"
+
+          xcrun simctl boot "$UDID" 2>/dev/null || true
+          xcrun simctl bootstatus "$UDID" -b 2>/dev/null || true
+          sleep 5
+
+          xcrun simctl install "$UDID" "$APP_PATH"
+          xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true
+
+          DELAY=${{ inputs.screenshot_delay }}
+          echo "等待 ${DELAY} 秒..."
+          sleep "$DELAY"
+
+          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|merchant\|laiyima" | head -1 || true)
+          if [ -z "$PID" ]; then
+            echo "::error::App 在 ${DEVICE} 上崩溃！"
+            xcrun simctl spawn "$UDID" log show --last 30s --predicate 'process == "HBuilder"' 2>/dev/null | tail -50 || true
+            xcrun simctl shutdown "$UDID" 2>/dev/null || true
+            xcrun simctl delete "$UDID" 2>/dev/null || true
+            exit 1
+          fi
+          echo "✅ App 进程存活 — 未崩溃"
+
+          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.5-home.png"
+          sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.5-home.png" | tail -2
+          echo "✅ 截图完成: iphone-6.5-home.png"
+
+          sleep 5
+          xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.5-loaded.png"
+          sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.5-loaded.png" | tail -2
+          echo "✅ 截图完成: iphone-6.5-loaded.png"
+
+          xcrun simctl shutdown "$UDID" 2>/dev/null || true
+          xcrun simctl delete "$UDID" 2>/dev/null || true
+
+      - name: Crash test on iPad Air (审核 2.1a 复现)
+        if: ${{ inputs.test_ipad == true }}
+        run: |
+          set -eu
+          DEVICE="iPad Air (M3)"
+          echo "========== ${DEVICE} (审核崩溃复现) =========="
+          echo "审核环境: iPad Air 11-inch (M3) / iPadOS 27.0"
+
+          # iPad Air M3 可能不存在于当前 Xcode，尝试多个名称
+          IPAD_NAME=""
+          for name in "iPad Air (M3)" "iPad Air 11-inch (M2)" "iPad Air 11-inch (M3)" "iPad Air (5th generation)"; do
+            if xcrun simctl list devicetypes | grep -q "$name" 2>/dev/null; then
+              IPAD_NAME="$name"
+              break
+            fi
+          done
+
+          if [ -z "$IPAD_NAME" ]; then
+            echo "::warning::当前 Xcode 未找到 iPad Air 模拟器类型"
+            echo "可用 iPad 设备类型:"
+            xcrun simctl list devicetypes | grep -i ipad | head -10
+            echo "跳过 iPad 测试（不阻断）"
+            exit 0
+          fi
+          echo "使用设备类型: $IPAD_NAME"
+
+          UDID=$(xcrun simctl create "test-ipad-air" "$IPAD_NAME" 2>/dev/null || true)
+          if [ -z "$UDID" ]; then
+            echo "::warning::无法创建 iPad 模拟器，跳过"
+            exit 0
+          fi
+          echo "模拟器 UDID: $UDID"
+
+          xcrun simctl boot "$UDID" 2>/dev/null || true
+          xcrun simctl bootstatus "$UDID" -b 2>/dev/null || true
+          sleep 5
+
+          echo "安装 App..."
+          xcrun simctl install "$UDID" "$APP_PATH"
+
+          echo "启动 App: ${IOS_BUNDLE_ID}"
+          xcrun simctl launch "$UDID" "${IOS_BUNDLE_ID}" 2>&1 || true
+
+          DELAY=${{ inputs.screenshot_delay }}
+          echo "等待 ${DELAY} 秒..."
+          sleep "$DELAY"
+
+          # 崩溃检测：检查进程是否存活
+          PID=$(xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i "HBuilder\|merchant\|laiyima" | head -1 || true)
+          if [ -z "$PID" ]; then
+            echo "::error::❌ App 在 iPad Air 上崩溃了！"
+            echo "::error::这复现了 Apple 审核 2.1(a) 的崩溃问题"
+            echo ""
+            echo "=== 崩溃日志（模拟器系统日志）==="
+            xcrun simctl spawn "$UDID" log show --last 60s --predicate 'process == "HBuilder"' 2>/dev/null | tail -100 || true
+            echo ""
+            echo "=== crashreports ==="
+            xcrun simctl spawn "$UDID" ls -la /private/var/mobile/Library/Logs/CrashReporter/ 2>/dev/null || true
+            xcrun simctl spawn "$UDID" cat /private/var/mobile/Library/Logs/CrashReporter/*.ips 2>/dev/null | tail -80 || true
+
+            # 截一张崩溃后的画面（可能是黑屏或闪退后桌面）
+            xcrun simctl io "$UDID" screenshot "screenshots/ipad-crash.png" 2>/dev/null || true
+
+            xcrun simctl shutdown "$UDID" 2>/dev/null || true
+            xcrun simctl delete "$UDID" 2>/dev/null || true
+            echo "::error::iPad 测试失败：App 崩溃"
+            exit 1
+          fi
+          echo "✅ App 在 iPad Air 上正常运行 — 未崩溃！"
+
+          # 截图
+          xcrun simctl io "$UDID" screenshot "screenshots/ipad-air-home.png"
+          echo "✅ iPad 截图完成: ipad-air-home.png"
+
+          xcrun simctl shutdown "$UDID" 2>/dev/null || true
+          xcrun simctl delete "$UDID" 2>/dev/null || true
+
+      # -----------------------------------------------------------------------
+      # 阶段 8：上传截图
+      # -----------------------------------------------------------------------
+      - name: List screenshots
+        if: always()
+        run: |
+          echo "=== 所有截图 ==="
+          ls -la screenshots/ 2>/dev/null || echo "无截图目录"
+          echo ""
+          echo "=== 截图文件大小 ==="
+          for f in screenshots/*.png; do
+            [ -f "$f" ] || continue
+            SIZE=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null || echo "?")
+            echo "  $f: ${SIZE} 字节"
+          done
+
+      - name: Upload screenshots artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-screenshots-${{ inputs.oem_channel }}-${{ inputs.version_name }}
+          path: screenshots/*.png
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload simulator build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-build-log-${{ inputs.oem_channel }}
+          path: xcodebuild-sim.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      # -----------------------------------------------------------------------
+      # 阶段 8.5：校验苹果要求的截图分辨率
+      # 6.7" = 1290x2796（iPhone 15/14 Pro Max）
+      # 6.5" = 1242x2688（iPhone 11 Pro Max / XS Max）
+      # -----------------------------------------------------------------------
+      - name: Validate App Store screenshot resolutions
+        run: |
+          set -eu
+          check() {
+            f="$1"; ew="$2"; eh="$3"
+            [ -f "$f" ] || { echo "::error::缺少截图 $f"; exit 1; }
+            w=$(sips -g pixelWidth "$f" | awk '/pixelWidth/ {print $2}')
+            h=$(sips -g pixelHeight "$f" | awk '/pixelHeight/ {print $2}')
+            echo "$f: ${w}x${h}（期望 ${ew}x${eh}）"
+            if [ "$w" != "$ew" ] || [ "$h" != "$eh" ]; then
+              echo "::error::$f 分辨率不符合 App Store 要求"
+              exit 1
+            fi
+          }
+          check screenshots/iphone-6.7-home.png 1290 2796
+          check screenshots/iphone-6.5-home.png 1242 2688
+          echo "✅ 尺寸校验通过"
+
+      # -----------------------------------------------------------------------
+      # 阶段 9：清理
+      # -----------------------------------------------------------------------
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "=== 清理 ==="
+          rm -f ~/.ssh/id_ed25519 2>/dev/null || true
+          xcrun simctl shutdown all 2>/dev/null || true
+          echo "已关闭所有模拟器"
