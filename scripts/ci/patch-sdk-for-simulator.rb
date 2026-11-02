@@ -6,9 +6,6 @@
 #   "building for 'iOS-simulator', but linking in object file ... built for 'iOS'"
 # 本脚本把 arm64 真机 Mach-O 的 platform 从 iOS(2) 改为 iOS Simulator(7)，
 # 不改任何代码/符号，仅绕过链接器的平台校验。正式 IPA 不受影响。
-require 'fileutils'
-require 'tmpdir'
-require 'shellwords'
 
 LC_BUILD_VERSION = 0x32
 LC_VERSION_MIN_IPHONEOS = 0x25
@@ -61,8 +58,7 @@ def patch_thin_macho!(data)
   changed
 end
 
-def patch_macho_file!(path)
-  data = File.binread(path)
+def patch_macho_bytes!(data)
   changed = 0
 
   if data[0, 4] && data[0, 4].unpack1('N') == 0xcafebabe
@@ -80,42 +76,63 @@ def patch_macho_file!(path)
     changed += patch_thin_macho!(data)
   end
 
+  changed
+end
+
+def patch_macho_file!(path)
+  data = File.binread(path)
+  changed = patch_macho_bytes!(data)
   File.binwrite(path, data) if changed.positive?
   changed
 end
 
+# 直接就地解析 ar 成员并改写 Mach-O 字节，不依赖 ar/libtool 解压重打包。
 def patch_archive!(path)
-  # 进入临时目录后相对路径会失效，先转绝对路径
   abs_path = File.expand_path(path)
-  return 0 unless File.binread(abs_path, 8) == "!<arch>\n"
+  data = File.binread(abs_path)
+  return 0 unless data[0, 8] == "!<arch>\n"
 
-  members = `ar -t #{abs_path.shellescape} 2>/dev/null`.lines.map(&:strip).reject(&:empty?)
-  return 0 if members.empty?
-
+  offset = 8
   changed = 0
-  Dir.mktmpdir do |dir|
-    Dir.chdir(dir) do
-      output = `ar -x #{abs_path.shellescape} 2>&1`
-      unless $?.success?
-        warn "::warning::解压静态库失败，保持原文件: #{path} #{output.lines.last.to_s.strip}"
-        return 0
-      end
-      objects = members.select { |m| File.file?(m) }
-      return 0 if objects.empty?
-      $stats[:archive_objects] += objects.length
-      objects.each { |obj| changed += patch_macho_file!(obj) }
-      if changed.positive?
-        tmp_archive = File.join(dir, 'patched.a')
-        ok = system('xcrun', 'libtool', '-static', '-o', tmp_archive, *objects,
-                    out: File::NULL, err: File::NULL)
-        if ok
-          FileUtils.cp(tmp_archive, abs_path)
-          $stats[:archive_repacked] += 1
-        else
-          warn "::warning::静态库重新打包失败，保持原文件: #{path}"
-        end
-      end
+  objects = 0
+
+  while offset + 60 <= data.bytesize
+    header = data[offset, 60]
+    break if header.nil? || header.bytesize < 60
+
+    name = header[0, 16].to_s.strip
+    size = header[48, 10].to_s.strip.to_i
+    break unless header[58, 2] == "`\n"
+
+    member_start = offset + 60
+    member = data[member_start, size]
+    break if member.nil? || member.bytesize < size
+
+    unless name.start_with?('__.SYMDEF') || name == '//' || name == '/'
+      objects += 1
     end
+
+    body = member
+    if name.start_with?('#1/')
+      name_len = name.sub('#1/', '').to_i
+      body = member[name_len..] || ''
+    end
+
+    n = patch_macho_bytes!(body)
+    if n.positive?
+      body_offset = member_start + (member.bytesize - body.bytesize)
+      data[body_offset, body.bytesize] = body
+      changed += n
+    end
+
+    offset = member_start + size
+    offset += 1 if offset.odd?
+  end
+
+  $stats[:archive_objects] += objects
+  if changed.positive?
+    File.binwrite(abs_path, data)
+    $stats[:archive_repacked] += 1
   end
   changed
 end
@@ -150,7 +167,7 @@ end
 
 puts "Simulator 构建：修补完成，共 #{total} 处 platform/version-min -> 7"
 puts "  含改动的静态库: #{$stats[:archives]}，framework/dylib: #{$stats[:frameworks]}"
-puts "  已重新打包静态库: #{$stats[:archive_repacked]}，处理对象文件: #{$stats[:archive_objects]}"
+puts "  已就地修补静态库: #{$stats[:archive_repacked]}，处理对象文件: #{$stats[:archive_objects]}"
 if $stats[:version_min_removed].positive?
   puts "  已删除旧格式 LC_VERSION_MIN_IPHONEOS: #{$stats[:version_min_removed]} 处"
 end

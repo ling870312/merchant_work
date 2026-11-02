@@ -261,7 +261,6 @@ jobs:
         run: |
           cd sdk-root
           ruby "$GITHUB_WORKSPACE/scripts/ci/patch-sdk-for-simulator.rb"
-          ruby "$GITHUB_WORKSPACE/scripts/ci/strip-device-only-frameworks.rb" || true
           echo "SDK 平台元数据已处理（不影响真机/IPA 构建）"
 
       - name: Inject feature.plist and uniplugins
