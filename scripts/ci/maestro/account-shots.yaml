@@ -1,0 +1,78 @@
+appId: ${APP_ID}
+---
+# 登录 + 五个业务页面截图
+# 账号密码由 GitHub Secrets 注入，不写入仓库
+- launchApp:
+    clearState: true
+
+# ATT / 通知等系统弹窗（存在则处理，不存在跳过）
+- tapOn:
+    text: "要求.*不跟踪"
+    optional: true
+
+- extendedWaitUntil:
+    visible: "请输入账号"
+    timeout: 30000
+- extendedWaitUntil:
+    visible: "登录您的账户以继续"
+    timeout: 30000
+
+- tapOn: "请输入账号"
+- inputText: ${SCREENSHOT_USERNAME}
+- tapOn: "请输入密码"
+- inputText: ${SCREENSHOT_PASSWORD}
+- hideKeyboard
+- tapOn: "我已阅读并同意"
+- tapOn: "登 录"
+
+# 登录成功回到首页
+- extendedWaitUntil:
+    visible: "门店管理"
+    timeout: 60000
+- tapOn:
+    text: "允许"
+    optional: true
+- takeScreenshot: ${PREFIX}-shop-home
+
+# 商品管理
+- tapOn: "商品管理"
+- extendedWaitUntil:
+    visible: "盘点"
+    timeout: 30000
+- takeScreenshot: ${PREFIX}-goods
+
+# 库存盘点（商品管理底部“盘点”入口）
+- tapOn: "盘点"
+- extendedWaitUntil:
+    visible: "扫码后可直接盘点当前门店商品"
+    timeout: 30000
+- takeScreenshot: ${PREFIX}-inventory
+
+# 回首页后进入订单/销售详情
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible: "门店管理"
+    timeout: 30000
+- tapOn: "销售详情"
+- extendedWaitUntil:
+    visible: "搜索订单号、商品名称或会员信息"
+    timeout: 30000
+- takeScreenshot: ${PREFIX}-orders
+
+# 回首页后进入分屏监控（实时视频）
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible: "门店监控"
+    timeout: 30000
+- scrollUntilVisible:
+    element: "分屏"
+    direction: DOWN
+- tapOn: "分屏"
+- extendedWaitUntil:
+    visible: "分屏监控"
+    timeout: 30000
+- waitForAnimationToEnd:
+    timeout: 30000
+- takeScreenshot: ${PREFIX}-monitor

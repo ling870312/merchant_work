@@ -83,6 +83,9 @@ jobs:
   simulator-test:
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      SCREENSHOT_USERNAME: ${{ secrets.SCREENSHOT_USERNAME }}
+      SCREENSHOT_PASSWORD: ${{ secrets.SCREENSHOT_PASSWORD }}
     steps:
       # -----------------------------------------------------------------------
       # 阶段 0：取本仓库 CI 脚本
@@ -465,6 +468,16 @@ jobs:
           ls -la "$APP_PATH"
 
       # -----------------------------------------------------------------------
+      # 阶段 6.5：安装 Maestro（仅配置测试账号时启用登录截图）
+      # -----------------------------------------------------------------------
+      - name: Install Maestro
+        if: env.SCREENSHOT_USERNAME != ''
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+          "$HOME/.maestro/bin/maestro" --version
+
+      # -----------------------------------------------------------------------
       # 阶段 7：模拟器测试 + 截图
       # -----------------------------------------------------------------------
       - name: Test & Screenshot on 6.7-inch iPhone (15/14 Pro Max)
@@ -559,6 +572,11 @@ jobs:
           sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.7-loaded.png" | tail -2
           echo "✅ 截图完成: iphone-6.7-loaded.png"
 
+          # 登录并截取业务页面（仅配置测试账号时）
+          if [ -n "${SCREENSHOT_USERNAME:-}" ]; then
+            bash "$GITHUB_WORKSPACE/scripts/ci/capture-account-shots.sh" "$UDID" "$IOS_BUNDLE_ID" "iphone-6.7"
+          fi
+
           # 清理
           xcrun simctl shutdown "$UDID" 2>/dev/null || true
           xcrun simctl delete "$UDID" 2>/dev/null || true
@@ -620,6 +638,11 @@ jobs:
           xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.1-loaded.png"
           sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.1-loaded.png" | tail -2
           echo "✅ 截图完成: iphone-6.1-loaded.png"
+
+          # 登录并截取业务页面（仅配置测试账号时）
+          if [ -n "${SCREENSHOT_USERNAME:-}" ]; then
+            bash "$GITHUB_WORKSPACE/scripts/ci/capture-account-shots.sh" "$UDID" "$IOS_BUNDLE_ID" "iphone-6.1"
+          fi
 
           xcrun simctl shutdown "$UDID" 2>/dev/null || true
           xcrun simctl delete "$UDID" 2>/dev/null || true
@@ -683,6 +706,11 @@ jobs:
           xcrun simctl io "$UDID" screenshot "screenshots/iphone-6.5-loaded.png"
           sips -g pixelWidth -g pixelHeight "screenshots/iphone-6.5-loaded.png" | tail -2
           echo "✅ 截图完成: iphone-6.5-loaded.png"
+
+          # 登录并截取业务页面（仅配置测试账号时）
+          if [ -n "${SCREENSHOT_USERNAME:-}" ]; then
+            bash "$GITHUB_WORKSPACE/scripts/ci/capture-account-shots.sh" "$UDID" "$IOS_BUNDLE_ID" "iphone-6.5"
+          fi
 
           xcrun simctl shutdown "$UDID" 2>/dev/null || true
           xcrun simctl delete "$UDID" 2>/dev/null || true
@@ -759,6 +787,25 @@ jobs:
           check screenshots/iphone-6.7-home.png 1290 2796
           check screenshots/iphone-6.5-home.png 1242 2688
           check_any screenshots/iphone-6.1-home.png 1179x2556 1170x2532
+
+          # 登录后业务页面（如果配置了测试账号并执行了 Maestro）
+          if [ -f screenshots/iphone-6.7-shop-home.png ]; then
+            check screenshots/iphone-6.7-shop-home.png 1290 2796
+            check screenshots/iphone-6.7-goods.png 1290 2796
+            check screenshots/iphone-6.7-inventory.png 1290 2796
+            check screenshots/iphone-6.7-orders.png 1290 2796
+            check screenshots/iphone-6.7-monitor.png 1290 2796
+            check screenshots/iphone-6.5-shop-home.png 1242 2688
+            check screenshots/iphone-6.5-goods.png 1242 2688
+            check screenshots/iphone-6.5-inventory.png 1242 2688
+            check screenshots/iphone-6.5-orders.png 1242 2688
+            check screenshots/iphone-6.5-monitor.png 1242 2688
+            check_any screenshots/iphone-6.1-shop-home.png 1179x2556 1170x2532
+            check_any screenshots/iphone-6.1-goods.png 1179x2556 1170x2532
+            check_any screenshots/iphone-6.1-inventory.png 1179x2556 1170x2532
+            check_any screenshots/iphone-6.1-orders.png 1179x2556 1170x2532
+            check_any screenshots/iphone-6.1-monitor.png 1179x2556 1170x2532
+          fi
           echo "✅ 尺寸校验通过"
 
       # -----------------------------------------------------------------------
