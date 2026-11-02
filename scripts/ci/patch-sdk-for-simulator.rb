@@ -16,7 +16,6 @@ PLATFORM_IOS = 2
 PLATFORM_IOS_SIMULATOR = 7
 
 $stats = Hash.new(0)
-$version_min_only = []
 
 def patch_thin_macho!(data)
   magic = data[0, 4] && data[0, 4].unpack1('V')
@@ -25,14 +24,14 @@ def patch_thin_macho!(data)
   is64 = magic == 0xfeedfacf
   header_size = is64 ? 32 : 28
   ncmds = data[16, 4].to_s.unpack1('V').to_i
+  sizeofcmds = data[20, 4].to_s.unpack1('V').to_i
   off = header_size
   changed = 0
-  saw_version_min = false
 
-  ncmds.times do
+  while ncmds.positive?
     cmd = data[off, 4].to_s.unpack1('V').to_i
     cmdsize = data[off + 4, 4].to_s.unpack1('V').to_i
-    break if cmdsize < 8
+    break if cmdsize < 8 || off + cmdsize > header_size + sizeofcmds
 
     if cmd == LC_BUILD_VERSION
       platform = data[off + 8, 4].to_s.unpack1('V').to_i
@@ -40,13 +39,25 @@ def patch_thin_macho!(data)
         data[off + 8, 4] = [PLATFORM_IOS_SIMULATOR].pack('V')
         changed += 1
       end
+      off += cmdsize
     elsif cmd == LC_VERSION_MIN_IPHONEOS
-      saw_version_min = true
+      # 旧格式没有 platform 字段（不存在 iOS Simulator 版本），
+      # 直接删除该 load command，让链接器按目标平台处理。
+      region_end = header_size + sizeofcmds
+      data[off...(region_end - cmdsize)] = data[(off + cmdsize)...region_end]
+      data[(region_end - cmdsize)...region_end] = "\0" * cmdsize
+      sizeofcmds -= cmdsize
+      ncmds -= 1
+      data[16, 4] = [ncmds].pack('V')
+      data[20, 4] = [sizeofcmds].pack('V')
+      $stats[:version_min_removed] += 1
+      changed += 1
+      # 后面的命令已经左移，off 保持不变
+    else
+      off += cmdsize
     end
-    off += cmdsize
   end
 
-  $stats[:version_min] += 1 if saw_version_min && changed.zero?
   changed
 end
 
@@ -74,27 +85,32 @@ def patch_macho_file!(path)
 end
 
 def patch_archive!(path)
-  return 0 unless File.binread(path, 8) == "!<arch>\n"
+  # 进入临时目录后相对路径会失效，先转绝对路径
+  abs_path = File.expand_path(path)
+  return 0 unless File.binread(abs_path, 8) == "!<arch>\n"
 
-  members = `ar -t #{path.shellescape} 2>/dev/null`.lines.map(&:strip).reject(&:empty?)
+  members = `ar -t #{abs_path.shellescape} 2>/dev/null`.lines.map(&:strip).reject(&:empty?)
   return 0 if members.empty?
 
   changed = 0
   Dir.mktmpdir do |dir|
     Dir.chdir(dir) do
-      unless system('ar', '-x', path, out: File::NULL, err: File::NULL)
-        warn "::warning::解压静态库失败: #{path}"
+      output = `ar -x #{abs_path.shellescape} 2>&1`
+      unless $?.success?
+        warn "::warning::解压静态库失败，保持原文件: #{path} #{output.lines.last.to_s.strip}"
         return 0
       end
       objects = members.select { |m| File.file?(m) }
       return 0 if objects.empty?
+      $stats[:archive_objects] += objects.length
       objects.each { |obj| changed += patch_macho_file!(obj) }
       if changed.positive?
         tmp_archive = File.join(dir, 'patched.a')
         ok = system('xcrun', 'libtool', '-static', '-o', tmp_archive, *objects,
                     out: File::NULL, err: File::NULL)
         if ok
-          FileUtils.cp(tmp_archive, path)
+          FileUtils.cp(tmp_archive, abs_path)
+          $stats[:archive_repacked] += 1
         else
           warn "::warning::静态库重新打包失败，保持原文件: #{path}"
         end
@@ -132,8 +148,9 @@ machos.each do |path|
   puts "  #{path}: #{n} 个切片改为 Simulator" if n.positive?
 end
 
-puts "Simulator 构建：修补完成，共 #{total} 处 platform=2 -> 7"
+puts "Simulator 构建：修补完成，共 #{total} 处 platform/version-min -> 7"
 puts "  含改动的静态库: #{$stats[:archives]}，framework/dylib: #{$stats[:frameworks]}"
-if $stats[:version_min].positive?
-  puts "  ::warning::有 #{$stats[:version_min]} 个文件只含 LC_VERSION_MIN_IPHONEOS（无法就地改平台），若链接失败需另行处理"
+puts "  已重新打包静态库: #{$stats[:archive_repacked]}，处理对象文件: #{$stats[:archive_objects]}"
+if $stats[:version_min_removed].positive?
+  puts "  已删除旧格式 LC_VERSION_MIN_IPHONEOS: #{$stats[:version_min_removed]} 处"
 end
