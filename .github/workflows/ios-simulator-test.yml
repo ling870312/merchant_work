@@ -257,6 +257,12 @@ jobs:
           ruby "$GITHUB_WORKSPACE/scripts/ci/integrate-plugins.rb"
           echo "插件集成完成"
 
+      - name: Strip device-only frameworks (simulator only)
+        run: |
+          cd sdk-root
+          ruby "$GITHUB_WORKSPACE/scripts/ci/strip-device-only-frameworks.rb"
+          echo "真机专用 framework 已处理（不影响真机/IPA 构建）"
+
       - name: Inject feature.plist and uniplugins
         run: |
           cd sdk-root
