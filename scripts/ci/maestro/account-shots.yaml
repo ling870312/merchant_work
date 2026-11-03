@@ -63,10 +63,20 @@ appId: ${APP_ID}
     direction: DOWN
 - tapOn: "登 录"
 
+# 登录请求可能受网络/租户加载影响，首次点击未生效时再点一次
+- waitForAnimationToEnd:
+    timeout: 5000
+- takeScreenshot: ${PREFIX}-debug-after-login
+- runFlow:
+    when:
+      visible: "登 录"
+    commands:
+      - tapOn: "登 录"
+
 # 登录成功回到首页
 - extendedWaitUntil:
     visible: "门店管理"
-    timeout: 60000
+    timeout: 120000
 - tapOn:
     text: "允许"
     optional: true
