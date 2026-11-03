@@ -7,7 +7,7 @@
 - CFBundleIdentifier（包名）
 - CFBundleIconName
 - CFBundleShortVersionString / CFBundleVersion（版本号）
-- 清理重复/损坏的隐私键并重写
+- 清理损坏的隐私键并补齐用途说明（保留 SDK 自带的其它隐私键）
 - UISupportedInterfaceOrientations（放开竖屏 + 横屏，监控播放器需要）
 - UIDeviceFamily=[1]（仅 iPhone，不声明 iPad 支持，避免 iPadOS 启动崩溃）
 
@@ -58,23 +58,37 @@ def main():
     print(f'CFBundleShortVersionString={args.version_name}')
     print(f'CFBundleVersion={args.version_code}')
 
-    # 6. 清理重复/损坏的隐私键并重写
+    # 6. 清理损坏的隐私键并补齐用途说明
+    #    只删明显损坏的键（" - 2" 后缀、空值），SDK 模板自带的其它隐私键必须保留：
+    #    一旦把 App/SDK 实际会调用的 UsageDescription 删掉，调用对应 API 时会被
+    #    TCC 以 __TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__ 直接终止（SIGABRT）。
+    privacy_pattern = re.compile(r'^NS.*(UsageDescription|WhenInUse|Always|Tracking)')
     removed = []
     for k in list(pl.keys()):
-        if re.match(r'^NS.*(UsageDescription|WhenInUse|Always|Tracking)', k) or ' - ' in k:
+        if ' - ' in k:
             del pl[k]
             removed.append(k)
+            continue
+        if privacy_pattern.match(k):
+            value = pl.get(k)
+            if not isinstance(value, str) or not value.strip():
+                del pl[k]
+                removed.append(k)
     if removed:
-        print(f'已删除隐私键: {removed}')
+        print(f'已删除损坏隐私键: {removed}')
 
-    pl['NSCameraUsageDescription'] = '用于扫描商品条码、识别商品'
-    pl['NSMicrophoneUsageDescription'] = '用于门店远程对讲语音通话'
-    pl['NSPhotoLibraryUsageDescription'] = '用于上传商品图片、门店资料图片'
-    pl['NSBluetoothAlwaysUsageDescription'] = '用于连接门店蓝牙设备（打印机、门禁控制器等）'
-    pl['NSLocationWhenInUseUsageDescription'] = '用于获取门店位置、展示周边服务'
-    # ATT 请求必须配套该键，否则 iOS 会以 TCC 隐私违规直接终止 App
-    pl['NSUserTrackingUsageDescription'] = '用于向您提供更相关的服务与内容，并改进产品体验'
-    print('隐私用途说明已清理并重写')
+    required_privacy = {
+        'NSCameraUsageDescription': '用于扫描商品条码、识别商品',
+        'NSMicrophoneUsageDescription': '用于门店远程对讲语音通话',
+        'NSPhotoLibraryUsageDescription': '用于上传商品图片、门店资料图片',
+        'NSBluetoothAlwaysUsageDescription': '用于连接门店蓝牙设备（打印机、门禁控制器等）',
+        'NSLocationWhenInUseUsageDescription': '用于获取门店位置、展示周边服务',
+        # ATT 请求必须配套该键，否则 iOS 会以 TCC 隐私违规直接终止 App
+        'NSUserTrackingUsageDescription': '用于向您提供更相关的服务与内容，并改进产品体验',
+    }
+    for key, value in required_privacy.items():
+        pl[key] = value
+    print(f'隐私用途说明已补齐: {",".join(required_privacy)}')
 
     # 7. 屏幕方向：放开竖屏 + 横屏（门店监控播放器"横屏"需要）。
     #    manifest.json 的 app-plus.screenOrientation 只对 DCloud 云打包生效；

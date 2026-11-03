@@ -472,6 +472,45 @@ jobs:
           echo "=== 所有 IPA ==="
           ls -la ${{ inputs.oem_channel }}-*.ipa 2>/dev/null || echo "无 IPA 产出"
 
+      - name: Verify Info.plist privacy keys in IPA
+        run: |
+          set -eo pipefail
+          IPA_FILE=$(ls ${{ inputs.oem_channel }}-*appstore.ipa 2>/dev/null | head -1 || true)
+          if [ -z "$IPA_FILE" ]; then
+            IPA_FILE=$(ls ${{ inputs.oem_channel }}-*.ipa 2>/dev/null | head -1 || true)
+          fi
+          [ -n "$IPA_FILE" ] || { echo "::error::未找到 IPA，无法校验 Info.plist"; exit 1; }
+          echo "=== 校验 IPA Info.plist 隐私键: $IPA_FILE ==="
+          rm -rf /tmp/ipa-plist
+          mkdir -p /tmp/ipa-plist
+          unzip -q "$IPA_FILE" -d /tmp/ipa-plist
+          PLIST=$(find /tmp/ipa-plist/Payload -maxdepth 2 -name Info.plist | head -1 || true)
+          [ -n "$PLIST" ] || { echo "::error::IPA 内未找到 Info.plist"; exit 1; }
+          python3 - "$PLIST" <<'PY'
+          import plistlib
+          import sys
+
+          pl = plistlib.load(open(sys.argv[1], 'rb'))
+          required = [
+              'NSCameraUsageDescription',
+              'NSMicrophoneUsageDescription',
+              'NSPhotoLibraryUsageDescription',
+              'NSBluetoothAlwaysUsageDescription',
+              'NSLocationWhenInUseUsageDescription',
+              'NSUserTrackingUsageDescription',
+          ]
+          missing = [k for k in required if not str(pl.get(k) or '').strip()]
+          for k in required:
+              flag = '❌' if k in missing else '✅'
+              print(f'  {flag} {k} = {pl.get(k, "")}')
+          if missing:
+              print('::error::Info.plist 缺少隐私用途说明: ' + ','.join(missing))
+              print('::error::调用对应 API 时会被 TCC 以隐私违规终止（SIGABRT），审核判定为 2.1(a) 启动崩溃')
+              sys.exit(1)
+          print('✅ 隐私用途说明齐全')
+          PY
+          rm -rf /tmp/ipa-plist
+
       - name: Deep verify IPA plugin integration
         run: |
           IPA_FILE=$(ls ${{ inputs.oem_channel }}-*appstore.ipa 2>/dev/null | head -1)
