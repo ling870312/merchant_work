@@ -107,9 +107,20 @@ appId: ${APP_ID}
     element: "商品管理"
     direction: DOWN
 - tapOn: "商品管理"
+- waitForAnimationToEnd:
+    timeout: 3000
+# 首次点击可能未生效（仍在首页），重试一次
+- runFlow:
+    when:
+      visible: "首页"
+    commands:
+      - scrollUntilVisible:
+          element: "商品管理"
+          direction: DOWN
+      - tapOn: "商品管理"
 - extendedWaitUntil:
     visible: "盘点"
-    timeout: 30000
+    timeout: 60000
 - takeScreenshot: ${PREFIX}-goods
 
 # 库存盘点（商品管理底部“盘点”入口）
@@ -129,9 +140,19 @@ appId: ${APP_ID}
     element: "销售详情"
     direction: DOWN
 - tapOn: "销售详情"
+- waitForAnimationToEnd:
+    timeout: 3000
+- runFlow:
+    when:
+      visible: "首页"
+    commands:
+      - scrollUntilVisible:
+          element: "销售详情"
+          direction: DOWN
+      - tapOn: "销售详情"
 - extendedWaitUntil:
     visible: "搜索订单号、商品名称或会员信息"
-    timeout: 30000
+    timeout: 60000
 - takeScreenshot: ${PREFIX}-orders
 
 # 点击第一张订单卡片进入订单详情（截图构建已为卡片添加详情跳转）

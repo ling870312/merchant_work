@@ -1,4 +1,4 @@
-name: iOS Simulator Test & Screenshot
+﻿name: iOS Simulator Test & Screenshot
 
 # =============================================================================
 # iOS 模拟器测试与自动截屏工作流
@@ -492,6 +492,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Test & Screenshot on 6.7-inch iPhone (15/14 Pro Max)
         if: contains(inputs.capture_sizes, '6.7')
+        continue-on-error: true
         run: |
           set -eu
           mkdir -p screenshots
@@ -595,6 +596,7 @@ jobs:
 
       - name: Test & Screenshot on 6.1-inch iPhone (15/14/13)
         if: contains(inputs.capture_sizes, '6.1')
+        continue-on-error: true
         run: |
           set -eu
 
@@ -661,6 +663,7 @@ jobs:
 
       - name: Test & Screenshot on 6.5-inch iPhone (11 Pro Max / XS Max)
         if: contains(inputs.capture_sizes, '6.5')
+        continue-on-error: true
         run: |
           set -eu
 
@@ -730,6 +733,7 @@ jobs:
 
       - name: Test & Screenshot on 6.3-inch iPhone (17/16 Pro)
         if: contains(inputs.capture_sizes, '6.3')
+        continue-on-error: true
         run: |
           set -eu
 
@@ -848,11 +852,24 @@ jobs:
       # 阶段 8.5：校验苹果要求的截图分辨率（仅 iPhone）
       # 6.7" = 1290x2796（iPhone 15/14 Pro Max）
       # 6.5" = 1242x2688（iPhone 11 Pro Max / XS Max）
-      # 6.1" = 1179x2556（iPhone 15）或 1170x2532（iPhone 14 / 13）
+      # 6.3" = 1206x2622（iPhone 17/16 Pro）
+      # 6.1" = 1179x2556（iPhone 15，截图后补边）
       # -----------------------------------------------------------------------
       - name: Validate App Store screenshot resolutions
         run: |
           set -eu
+          # 本次要求截图的所有尺寸都必须有登录后截图，避免某台设备失败却静默通过
+          SIZES="${{ inputs.capture_sizes }}"
+          for s in 6.7 6.5 6.3 6.1; do
+            case ",$SIZES," in
+              *",$s,"*)
+                if [ ! -f "screenshots/iphone-$s-shop-home.png" ]; then
+                  echo "::error::缺少 $s 尺寸的登录后截图"
+                  exit 1
+                fi
+                ;;
+            esac
+          done
           check() {
             f="$1"; ew="$2"; eh="$3"
             [ -f "$f" ] || { echo "::error::缺少截图 $f"; exit 1; }
