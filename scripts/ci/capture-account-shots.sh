@@ -26,9 +26,14 @@ maestro test "$WORKSPACE/scripts/ci/maestro/account-shots.yaml" \
 MAESTRO_EXIT=$?
 set -e
 
-# 无论成功失败都把已生成的截图/诊断产物拷出来
+# 只把最终业务页截图拷进上传目录；debug/step 截图留在 maestro-output 里
 find "$OUT_DIR" -name "*.png" -type f | while read -r f; do
-  cp "$f" "$SHOT_DIR/$(basename "$f")"
+  base=$(basename "$f")
+  case "$base" in
+    "${PREFIX}-shop-home.png"|"${PREFIX}-goods.png"|"${PREFIX}-inventory.png"|"${PREFIX}-orders.png"|"${PREFIX}-order-detail.png")
+      cp "$f" "$SHOT_DIR/$base"
+      ;;
+  esac
 done
 echo "业务页面截图："
 ls -la "$SHOT_DIR" | tail -25

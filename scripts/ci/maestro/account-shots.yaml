@@ -5,12 +5,11 @@ appId: ${APP_ID}
 - launchApp:
     clearState: true
 
-# 冷启动默认是游客首页（iOS 审核要求），先截一张诊断图
+# 冷启动默认是游客首页（iOS 审核要求）
 - waitForAnimationToEnd:
     timeout: 5000
-- takeScreenshot: ${PREFIX}-debug-launch
 
-# ATT / 通知等系统弹窗（模拟器为英文，中英文都处理；可能延迟出现，做两次）
+# 先点 Ask App Not to Track 关闭 ATT，再截图，避免截图里带跟踪弹窗
 - tapOn:
     text: "Ask App Not to Track"
     optional: true
@@ -18,18 +17,10 @@ appId: ${APP_ID}
     text: "要求.*不跟踪"
     optional: true
 - waitForAnimationToEnd:
-    timeout: 2000
-- tapOn:
-    text: "Allow"
-    optional: true
-- tapOn:
-    text: "允许"
-    optional: true
-- waitForAnimationToEnd:
-    timeout: 2000
-- tapOn:
-    text: "Ask App Not to Track"
-    optional: true
+    timeout: 3000
+
+# 此时若仍有其它系统弹窗，这张诊断图会拍到（仅保留在 maestro-output，不随业务截图上传）
+- takeScreenshot: ${PREFIX}-debug-launch
 
 # 游客首页 → 登录页
 - tapOn:
@@ -59,6 +50,7 @@ appId: ${APP_ID}
 - hideKeyboard
 
 # 如果仍在登录页，滚动找到登录按钮并点击；若已自动完成登录则跳过
+# 滚动后页面可能回弹导致点击偏移（截图构建已把协议开关改成不可取消），仍停留在登录页则重试
 - runFlow:
     when:
       visible: "忘记密码？"
@@ -66,7 +58,20 @@ appId: ${APP_ID}
       - scrollUntilVisible:
           element: "登 录"
           direction: DOWN
-          centerElement: true
+      - tapOn: "登 录"
+      - waitForAnimationToEnd:
+          timeout: 5000
+- runFlow:
+    when:
+      visible: "忘记密码？"
+    commands:
+      - tapOn: "登 录"
+      - waitForAnimationToEnd:
+          timeout: 5000
+- runFlow:
+    when:
+      visible: "忘记密码？"
+    commands:
       - tapOn: "登 录"
 
 # 等待登录结果（不再自动二次点击，避免误触协议链接）
@@ -100,6 +105,33 @@ appId: ${APP_ID}
     optional: true
 - waitForAnimationToEnd:
     timeout: 5000
+# 截图前再清一次可能延迟出现的系统弹窗（通知/定位/ATT）
+- tapOn:
+    text: "Allow"
+    optional: true
+- tapOn:
+    text: "允许"
+    optional: true
+- tapOn:
+    text: "Allow Once"
+    optional: true
+- tapOn:
+    text: "允许一次"
+    optional: true
+- tapOn:
+    text: "Don't Allow"
+    optional: true
+- tapOn:
+    text: "不允许"
+    optional: true
+- tapOn:
+    text: "Ask App Not to Track"
+    optional: true
+- tapOn:
+    text: "要求.*不跟踪"
+    optional: true
+- waitForAnimationToEnd:
+    timeout: 2000
 - takeScreenshot: ${PREFIX}-shop-home
 
 # 商品管理（首页可能较长，先滚动到入口）
