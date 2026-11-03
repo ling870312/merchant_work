@@ -73,22 +73,19 @@ appId: ${APP_ID}
       - scrollUntilVisible:
           element: "登 录"
           direction: DOWN
+      - waitForAnimationToEnd:
+          timeout: 2000
       - tapOn: "登 录"
 
-# 登录请求可能受网络/租户加载影响，首次未生效时再点一次
+# 等待登录结果（不再自动二次点击，避免误触协议链接）
 - waitForAnimationToEnd:
-    timeout: 5000
+    timeout: 15000
 - takeScreenshot: ${PREFIX}-debug-after-login
-- runFlow:
-    when:
-      visible: "登 录"
-    commands:
-      - tapOn: "登 录"
 
 # 登录成功回到首页
 - extendedWaitUntil:
     visible: "首页"
-    timeout: 120000
+    timeout: 180000
 - tapOn:
     text: "Allow"
     optional: true
