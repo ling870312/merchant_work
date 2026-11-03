@@ -66,8 +66,7 @@ appId: ${APP_ID}
       - scrollUntilVisible:
           element: "登 录"
           direction: DOWN
-      - waitForAnimationToEnd:
-          timeout: 2000
+          centerElement: true
       - tapOn: "登 录"
 
 # 等待登录结果（不再自动二次点击，避免误触协议链接）
