@@ -51,8 +51,14 @@ appId: ${APP_ID}
     visible: "登录您的账户以继续"
     timeout: 30000
 
-# 先勾选协议（在密码框下方，键盘弹出前可点），再输入账号密码
+# 先勾选协议（小屏可能需要滚动），再输入账号密码
+- scrollUntilVisible:
+    element: "我已阅读并同意"
+    direction: DOWN
 - tapOn: "我已阅读并同意"
+- scrollUntilVisible:
+    element: "请输入账号"
+    direction: UP
 - tapOn: "请输入账号"
 - inputText: ${SCREENSHOT_USERNAME}
 - tapOn: "请输入密码"
@@ -81,14 +87,22 @@ appId: ${APP_ID}
 
 # 登录成功回到首页
 - extendedWaitUntil:
-    visible: "门店管理"
+    visible: "首页"
     timeout: 120000
+- tapOn:
+    text: "Allow"
+    optional: true
 - tapOn:
     text: "允许"
     optional: true
+- waitForAnimationToEnd:
+    timeout: 5000
 - takeScreenshot: ${PREFIX}-shop-home
 
-# 商品管理
+# 商品管理（首页可能较长，先滚动到入口）
+- scrollUntilVisible:
+    element: "商品管理"
+    direction: DOWN
 - tapOn: "商品管理"
 - extendedWaitUntil:
     visible: "盘点"
@@ -106,8 +120,11 @@ appId: ${APP_ID}
 - stopApp
 - launchApp
 - extendedWaitUntil:
-    visible: "门店管理"
+    visible: "首页"
     timeout: 30000
+- scrollUntilVisible:
+    element: "销售详情"
+    direction: DOWN
 - tapOn: "销售详情"
 - extendedWaitUntil:
     visible: "搜索订单号、商品名称或会员信息"
@@ -118,7 +135,7 @@ appId: ${APP_ID}
 - stopApp
 - launchApp
 - extendedWaitUntil:
-    visible: "门店监控"
+    visible: "首页"
     timeout: 30000
 - scrollUntilVisible:
     element: "分屏"
