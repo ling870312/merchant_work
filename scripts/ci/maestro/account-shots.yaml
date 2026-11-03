@@ -58,12 +58,18 @@ appId: ${APP_ID}
 - tapOn: "请输入密码"
 - inputText: ${SCREENSHOT_PASSWORD}
 - hideKeyboard
-- scrollUntilVisible:
-    element: "登 录"
-    direction: DOWN
-- tapOn: "登 录"
 
-# 登录请求可能受网络/租户加载影响，首次点击未生效时再点一次
+# 如果仍在登录页，滚动找到登录按钮并点击；若已自动完成登录则跳过
+- runFlow:
+    when:
+      visible: "忘记密码？"
+    commands:
+      - scrollUntilVisible:
+          element: "登 录"
+          direction: DOWN
+      - tapOn: "登 录"
+
+# 登录请求可能受网络/租户加载影响，首次未生效时再点一次
 - waitForAnimationToEnd:
     timeout: 5000
 - takeScreenshot: ${PREFIX}-debug-after-login
