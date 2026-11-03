@@ -43,6 +43,20 @@ def main():
     target.write_text(text, encoding='utf-8')
     print('已修改模拟器截图构建的 goInventory：直接进入盘点页')
 
+    # 盘点页 onShow 会在 APP 端自动拉起原生扫码，模拟器无摄像头会挡住页面，
+    # 截图构建中把「已触发自动扫码」标记初始化为 true，跳过自动扫码。
+    inventory = repo / 'src/packages/goods/inventory/index.vue'
+    inv_text = inventory.read_text(encoding='utf-8')
+    old_auto = 'const appAutoScanTriggered = ref(false)'
+    if old_auto in inv_text:
+        inv_text = inv_text.replace(old_auto, 'const appAutoScanTriggered = ref(true)', 1)
+        inventory.write_text(inv_text, encoding='utf-8')
+        print('已关闭盘点页模拟器自动拉起扫码')
+    elif 'const appAutoScanTriggered = ref(true)' in inv_text:
+        print('盘点页自动扫码已关闭，跳过')
+    else:
+        raise SystemExit('未找到 appAutoScanTriggered 初始化，源码结构可能已变化')
+
 
 if __name__ == '__main__':
     main()
