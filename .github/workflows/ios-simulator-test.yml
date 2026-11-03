@@ -133,6 +133,7 @@ jobs:
         run: |
           python3 "$GITHUB_WORKSPACE/scripts/ci/patch-screenshot-inventory.py" repo
           python3 "$GITHUB_WORKSPACE/scripts/ci/patch-screenshot-order-detail.py" repo
+          python3 "$GITHUB_WORKSPACE/scripts/ci/patch-screenshot-login.py" repo
 
       - name: Setup Node
         uses: actions/setup-node@v4

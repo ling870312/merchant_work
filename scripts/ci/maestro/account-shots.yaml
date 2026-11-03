@@ -51,14 +51,7 @@ appId: ${APP_ID}
     visible: "登录您的账户以继续"
     timeout: 30000
 
-# 先勾选协议（小屏可能需要滚动），再输入账号密码
-- scrollUntilVisible:
-    element: "我已阅读并同意"
-    direction: DOWN
-- tapOn: "我已阅读并同意"
-- scrollUntilVisible:
-    element: "请输入账号"
-    direction: UP
+# 截图构建已默认勾选协议，直接输入账号密码
 - tapOn: "请输入账号"
 - inputText: ${SCREENSHOT_USERNAME}
 - tapOn: "请输入密码"
@@ -81,6 +74,20 @@ appId: ${APP_ID}
 - waitForAnimationToEnd:
     timeout: 15000
 - takeScreenshot: ${PREFIX}-debug-after-login
+
+# 登录后可能弹通知/定位权限，先尝试关闭
+- tapOn:
+    text: "Allow"
+    optional: true
+- tapOn:
+    text: "允许"
+    optional: true
+- tapOn:
+    text: "Allow While Using App"
+    optional: true
+- tapOn:
+    text: "使用App时允许"
+    optional: true
 
 # 登录成功回到首页
 - extendedWaitUntil:
