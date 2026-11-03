@@ -131,19 +131,13 @@ appId: ${APP_ID}
     timeout: 30000
 - takeScreenshot: ${PREFIX}-orders
 
-# 回首页后进入分屏监控（实时视频）
-- stopApp
-- launchApp
+# 点击第一张订单卡片进入订单详情（截图构建已为卡片添加详情跳转）
+- tapOn:
+    text: "订单编号"
+    index: 0
 - extendedWaitUntil:
-    visible: "首页"
+    visible: "商品明细"
     timeout: 30000
-- scrollUntilVisible:
-    element: "分屏"
-    direction: DOWN
-- tapOn: "分屏"
-- extendedWaitUntil:
-    visible: "分屏监控"
-    timeout: 30000
-- waitForAnimationToEnd:
-    timeout: 30000
-- takeScreenshot: ${PREFIX}-monitor
+- takeScreenshot: ${PREFIX}-order-detail
+
+# 监控页依赖原生播放器/硬件视频流，暂时不截图

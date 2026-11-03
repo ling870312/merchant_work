@@ -57,6 +57,10 @@ on:
       gitee_branch:
         description: 'Gitee 分支（留空则用 Secret）'
         required: false
+      capture_sizes:
+        description: '要截图的尺寸，逗号分隔：6.7 / 6.5 / 6.1'
+        required: false
+        default: '6.7'
       screenshot_delay:
         description: '启动后等待截屏的秒数（App 加载需要时间）'
         required: false
@@ -128,6 +132,7 @@ jobs:
       - name: Patch inventory entry for screenshot build
         run: |
           python3 "$GITHUB_WORKSPACE/scripts/ci/patch-screenshot-inventory.py" repo
+          python3 "$GITHUB_WORKSPACE/scripts/ci/patch-screenshot-order-detail.py" repo
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -485,6 +490,7 @@ jobs:
       # 阶段 7：模拟器测试 + 截图
       # -----------------------------------------------------------------------
       - name: Test & Screenshot on 6.7-inch iPhone (15/14 Pro Max)
+        if: contains(inputs.capture_sizes, '6.7')
         run: |
           set -eu
           mkdir -p screenshots
@@ -587,6 +593,7 @@ jobs:
           echo "✅ ${DEVICE} 测试完成"
 
       - name: Test & Screenshot on 6.1-inch iPhone (15/14/13)
+        if: contains(inputs.capture_sizes, '6.1')
         run: |
           set -eu
 
@@ -652,6 +659,7 @@ jobs:
           xcrun simctl delete "$UDID" 2>/dev/null || true
 
       - name: Test & Screenshot on 6.5-inch iPhone (11 Pro Max / XS Max)
+        if: contains(inputs.capture_sizes, '6.5')
         run: |
           set -eu
 
@@ -797,9 +805,16 @@ jobs:
             echo "::error::$f 分辨率不符合 App Store 要求"
             exit 1
           }
-          check screenshots/iphone-6.7-home.png 1290 2796
-          check screenshots/iphone-6.5-home.png 1242 2688
-          check_any screenshots/iphone-6.1-home.png 1179x2556 1170x2532
+          # 游客首页（仅校验本次实际截图的尺寸）
+          if [ -f screenshots/iphone-6.7-home.png ]; then
+            check screenshots/iphone-6.7-home.png 1290 2796
+          fi
+          if [ -f screenshots/iphone-6.5-home.png ]; then
+            check screenshots/iphone-6.5-home.png 1242 2688
+          fi
+          if [ -f screenshots/iphone-6.1-home.png ]; then
+            check_any screenshots/iphone-6.1-home.png 1179x2556 1170x2532
+          fi
 
           # 登录后业务页面（如果配置了测试账号并执行了 Maestro）
           if [ -f screenshots/iphone-6.7-shop-home.png ]; then
@@ -807,17 +822,21 @@ jobs:
             check screenshots/iphone-6.7-goods.png 1290 2796
             check screenshots/iphone-6.7-inventory.png 1290 2796
             check screenshots/iphone-6.7-orders.png 1290 2796
-            check screenshots/iphone-6.7-monitor.png 1290 2796
+            check screenshots/iphone-6.7-order-detail.png 1290 2796
+          fi
+          if [ -f screenshots/iphone-6.5-shop-home.png ]; then
             check screenshots/iphone-6.5-shop-home.png 1242 2688
             check screenshots/iphone-6.5-goods.png 1242 2688
             check screenshots/iphone-6.5-inventory.png 1242 2688
             check screenshots/iphone-6.5-orders.png 1242 2688
-            check screenshots/iphone-6.5-monitor.png 1242 2688
+            check screenshots/iphone-6.5-order-detail.png 1242 2688
+          fi
+          if [ -f screenshots/iphone-6.1-shop-home.png ]; then
             check_any screenshots/iphone-6.1-shop-home.png 1179x2556 1170x2532
             check_any screenshots/iphone-6.1-goods.png 1179x2556 1170x2532
             check_any screenshots/iphone-6.1-inventory.png 1179x2556 1170x2532
             check_any screenshots/iphone-6.1-orders.png 1179x2556 1170x2532
-            check_any screenshots/iphone-6.1-monitor.png 1179x2556 1170x2532
+            check_any screenshots/iphone-6.1-order-detail.png 1179x2556 1170x2532
           fi
           echo "✅ 尺寸校验通过"
 
