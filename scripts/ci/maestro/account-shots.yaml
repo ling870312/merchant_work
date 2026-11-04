@@ -157,9 +157,18 @@ appId: ${APP_ID}
 
 # 库存盘点（商品管理底部“盘点”入口）
 - tapOn: "盘点"
+- waitForAnimationToEnd:
+    timeout: 3000
+# 首次点击可能未生效（仍在商品管理页），重试一次
+- runFlow:
+    when:
+      visible: "添加商品/库存"
+    commands:
+      - tapOn: "盘点"
+# 用盘点页搜索框占位文案判定页面已打开，比空状态文案更稳定
 - extendedWaitUntil:
-    visible: "扫码后可直接盘点当前门店商品"
-    timeout: 30000
+    visible: "请输入商品名称、条码或编码"
+    timeout: 60000
 - takeScreenshot: ${PREFIX}-inventory
 
 # 回首页后进入订单/销售详情
@@ -167,20 +176,25 @@ appId: ${APP_ID}
 - launchApp
 - extendedWaitUntil:
     visible: "首页"
-    timeout: 30000
-- scrollUntilVisible:
-    element: "销售详情"
-    direction: DOWN
-- tapOn: "销售详情"
+    timeout: 60000
 - waitForAnimationToEnd:
-    timeout: 3000
+    timeout: 5000
+# 销售详情可能已在首屏；已在订单页则跳过
 - runFlow:
     when:
-      visible: "首页"
+      visible: "销售详情"
+    commands:
+      - tapOn: "销售详情"
+- runFlow:
+    when:
+      notVisible: "搜索订单号、商品名称或会员信息"
     commands:
       - scrollUntilVisible:
           element: "销售详情"
           direction: DOWN
+          visibilityPercentage: 50
+          waitToSettleTimeoutMs: 800
+          timeout: 30000
       - tapOn: "销售详情"
 - extendedWaitUntil:
     visible: "搜索订单号、商品名称或会员信息"
