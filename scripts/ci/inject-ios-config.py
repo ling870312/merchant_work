@@ -83,12 +83,16 @@ def main():
         'NSPhotoLibraryUsageDescription': '用于上传商品图片、门店资料图片',
         'NSBluetoothAlwaysUsageDescription': '用于连接门店蓝牙设备（打印机、门禁控制器等）',
         'NSLocationWhenInUseUsageDescription': '用于获取门店位置、展示周边服务',
-        # ATT 请求必须配套该键，否则 iOS 会以 TCC 隐私违规直接终止 App
-        'NSUserTrackingUsageDescription': '用于向您提供更相关的服务与内容，并改进产品体验',
     }
     for key, value in required_privacy.items():
         pl[key] = value
     print(f'隐私用途说明已补齐: {",".join(required_privacy)}')
+
+    # ATT：App 不做跨 App 追踪，必须移除该键，否则 App Store Connect 要求
+    # 在 App 隐私里声明「数据用于追踪」而无法提交审核。
+    # SDK 启动的跟踪授权请求由编译进 App 的 ATTGuard.m 固定返回「拒绝」。
+    if pl.pop('NSUserTrackingUsageDescription', None) is not None:
+        print('已移除 NSUserTrackingUsageDescription（不做追踪）')
 
     # 7. 屏幕方向：放开竖屏 + 横屏（门店监控播放器"横屏"需要）。
     #    manifest.json 的 app-plus.screenOrientation 只对 DCloud 云打包生效；

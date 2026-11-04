@@ -497,7 +497,6 @@ jobs:
               'NSPhotoLibraryUsageDescription',
               'NSBluetoothAlwaysUsageDescription',
               'NSLocationWhenInUseUsageDescription',
-              'NSUserTrackingUsageDescription',
           ]
           missing = [k for k in required if not str(pl.get(k) or '').strip()]
           for k in required:
@@ -507,7 +506,12 @@ jobs:
               print('::error::Info.plist 缺少隐私用途说明: ' + ','.join(missing))
               print('::error::调用对应 API 时会被 TCC 以隐私违规终止（SIGABRT），审核判定为 2.1(a) 启动崩溃')
               sys.exit(1)
-          print('✅ 隐私用途说明齐全')
+          # 本 App 不做跨 App 追踪：保留该键会被 App Store Connect 拦截，
+          # 要求先在 App 隐私里声明「数据用于追踪」才能提交审核。
+          if str(pl.get('NSUserTrackingUsageDescription') or '').strip():
+              print('::error::二进制仍包含 NSUserTrackingUsageDescription，无法提交审核')
+              sys.exit(1)
+          print('✅ 隐私用途说明齐全，且未请求追踪')
           PY
           rm -rf /tmp/ipa-plist
 

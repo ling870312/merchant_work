@@ -44,16 +44,19 @@ def main():
         'NSPhotoLibraryUsageDescription': '用于上传商品图片、门店资料图片',
         'NSBluetoothAlwaysUsageDescription': '用于连接门店蓝牙设备（打印机、门禁控制器等）',
         'NSLocationWhenInUseUsageDescription': '用于获取门店位置、展示周边服务',
-        # ATT 请求必须配套该键，否则 iOS 会以 TCC 隐私违规直接终止 App
-        # （HBuilder/广告 SDK 启动时会调用 ATTrackingManager，缺失即崩溃）
-        'NSUserTrackingUsageDescription': '用于向您提供更相关的服务与内容，并改进产品体验',
     }
     for key, value in required_privacy.items():
         pl[key] = value
+    print('隐私用途说明已补齐:', ','.join(required_privacy))
+
+    # ATT：App 不做跨 App 追踪，不能保留该键，否则 App Store Connect 要求
+    # 声明「数据用于追踪」而无法提交审核。SDK 启动发出的跟踪授权请求
+    # 由编译进 App 的 ATTGuard.m 直接返回「拒绝」，不会弹窗也不会崩溃。
+    if pl.pop('NSUserTrackingUsageDescription', None) is not None:
+        print('已移除 NSUserTrackingUsageDescription（不做追踪，避免提交审核被拦）')
 
     with open(p, 'wb') as f:
         plistlib.dump(pl, f)
-    print('隐私用途说明已补齐:', ','.join(required_privacy))
 
 
 if __name__ == '__main__':

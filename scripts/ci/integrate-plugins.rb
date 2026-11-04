@@ -44,6 +44,22 @@ mon.path = 'DoorMasterMonitorPlayer'
 n = add_sources(mon, 'HBuilder-Hello/HBuilder-Hello/PlugIns/DoorMasterMonitorPlayer', target)
 puts "Monitor-Player: #{n} 个源文件加入编译"
 
+# 1.2) ATT 屏蔽：SDK 启动会请求跟踪授权，App 不做追踪，
+# Info.plist 已删除 NSUserTrackingUsageDescription（否则无法提交审核），
+# 这里把请求固定为「拒绝」，避免系统以隐私违规终止进程。
+require 'fileutils'
+guard_dir = 'HBuilder-Hello/HBuilder-Hello/PlugIns/ATTGuard'
+FileUtils.mkdir_p(guard_dir)
+guard_src = File.join(ENV.fetch('GITHUB_WORKSPACE', File.expand_path('..')), 'scripts/ci/native/ATTGuard.m')
+abort "!! 未找到 ATTGuard.m: #{guard_src}" unless File.file?(guard_src)
+FileUtils.cp(guard_src, guard_dir)
+guard = plugins.find_subpath('ATTGuard', true)
+guard.path = 'ATTGuard'
+already_added = guard.files.any? { |f| File.basename(f.path.to_s) == 'ATTGuard.m' }
+gn = add_sources(guard, guard_dir, target)
+abort '!! ATTGuard.m 未加入编译，ATT 请求将导致崩溃' if gn.zero? && !already_added
+puts "ATTGuard: #{gn} 个源文件加入编译"
+
 # 1.5) MobileVLCKit 高级播放内核（H265/RTMP/FLV/WSS-FLV）。
 # 由 prepare 工作流把 MobileVLCKit.xcframework 放置到 PlugIns/MobileVLCKit/。
 # 存在则 Link + Embed（该 framework 是动态库，必须同时 embed），并加 FRAMEWORK_SEARCH_PATHS。
