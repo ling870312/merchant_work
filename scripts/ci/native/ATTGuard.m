@@ -8,11 +8,19 @@
 // 所以在 App 启动前把该请求的返回值固定为「拒绝」：既不弹窗，也不崩溃。
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
 
 __attribute__((constructor))
 static void DMAttGuardInstall(void)
 {
     Class cls = NSClassFromString(@"ATTrackingManager");
+    if (cls == Nil) {
+        // 兜底：SDK 未静态链接该框架时手动加载，确保类已注册
+        void *handle = dlopen("/System/Library/Frameworks/AppTrackingTransparency.framework/AppTrackingTransparency", RTLD_LAZY);
+        if (handle != NULL) {
+            cls = NSClassFromString(@"ATTrackingManager");
+        }
+    }
     if (cls == Nil) {
         return;
     }
