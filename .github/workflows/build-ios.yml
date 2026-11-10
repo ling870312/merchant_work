@@ -493,7 +493,6 @@ jobs:
           pl = plistlib.load(open(sys.argv[1], 'rb'))
           required = [
               'NSCameraUsageDescription',
-              'NSMicrophoneUsageDescription',
               'NSPhotoLibraryUsageDescription',
               'NSBluetoothAlwaysUsageDescription',
               'NSLocationWhenInUseUsageDescription',
@@ -511,7 +510,11 @@ jobs:
           if str(pl.get('NSUserTrackingUsageDescription') or '').strip():
               print('::error::二进制仍包含 NSUserTrackingUsageDescription，无法提交审核')
               sys.exit(1)
-          print('✅ 隐私用途说明齐全，且未请求追踪')
+          # 当前版本未启用远程对讲（TRTC 未集成），不应申请麦克风权限。
+          if str(pl.get('NSMicrophoneUsageDescription') or '').strip():
+              print('::error::Info.plist 仍包含 NSMicrophoneUsageDescription，当前版本不使用麦克风，请移除')
+              sys.exit(1)
+          print('✅ 隐私用途说明齐全，且未请求追踪/麦克风')
           PY
           rm -rf /tmp/ipa-plist
 
