@@ -79,6 +79,7 @@ def main():
 
     required_privacy = {
         'NSCameraUsageDescription': '用于扫描商品条码、识别商品',
+        'NSMicrophoneUsageDescription': '用于门店远程对讲语音通话',
         'NSPhotoLibraryUsageDescription': '用于上传商品图片、门店资料图片',
         'NSBluetoothAlwaysUsageDescription': '用于连接门店蓝牙设备（打印机、门禁控制器等）',
         'NSLocationWhenInUseUsageDescription': '用于获取门店位置、展示周边服务',
@@ -87,10 +88,8 @@ def main():
         pl[key] = value
     print(f'隐私用途说明已补齐: {",".join(required_privacy)}')
 
-    # 麦克风：当前 iOS 版本未启用远程对讲（TRTC 未集成、intercomRuntime 关闭），
-    # 不申请麦克风权限。SDK 模板自带的该键一并移除，避免"声明却从不使用"被审核问询。
-    if pl.pop('NSMicrophoneUsageDescription', None) is not None:
-        print('已移除 NSMicrophoneUsageDescription（当前版本不使用麦克风）')
+    # 麦克风说明必须保留：DCloud/H5+ SDK 内含录音与音视频采集 API 引用，
+    # 即使业务侧未启用对讲，缺键也会被上传校验判 ITMS-90683 拒绝。
 
     # ATT：App 不做跨 App 追踪，必须移除该键，否则 App Store Connect 要求
     # 在 App 隐私里声明「数据用于追踪」而无法提交审核。
